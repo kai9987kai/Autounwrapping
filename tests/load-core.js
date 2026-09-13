@@ -24,7 +24,9 @@ function makeContext() {
 function loadCore({ viaSource = false } = {}) {
   const context = makeContext();
   for (const file of ['registry.js', ...ORDER]) {
-    const src = fs.readFileSync(path.join(CORE_DIR, file), 'utf8');
+    const full = path.join(CORE_DIR, file);
+    if (!fs.existsSync(full)) continue; // module not written yet
+    const src = fs.readFileSync(full, 'utf8');
     vm.runInContext(src, context, { filename: file });
   }
   if (viaSource) {
