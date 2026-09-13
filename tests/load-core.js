@@ -1,7 +1,12 @@
 'use strict';
 /* Loads the pure-JS UV kernel for node --test. The core modules are classic
  * scripts that register themselves on a global `UVCore`, so we evaluate them
- * in dependency order inside a fresh VM context and build the namespace. */
+ * in dependency order inside a fresh VM context and build the namespace.
+ *
+ *   loadCore()                                  every module present on disk
+ *   loadCore({ modules: ['math', 'mesh'] })     only these (+ registry), in ORDER
+ *   loadCore({ viaSource: true })               round-trip through UVCore.source()
+ */
 const path = require('path');
 const fs = require('fs');
 const vm = require('vm');
@@ -12,20 +17,30 @@ const ORDER = require('./core-order.json');
 
 function makeContext() {
   const sandbox = {
-    console, Math, Date, JSON, Error, Number, String, Array, Object, Map, Set,
-    Float32Array, Float64Array, Int32Array, Uint8Array, Uint32Array, Int8Array, Uint16Array, Int16Array, ArrayBuffer,
-    Infinity, NaN, isFinite, isNaN, performance: globalThis.performance,
+    console, Math, Date, JSON, Error, TypeError, RangeError, Number, String, Boolean, Array, Object, Map, Set, WeakMap, Symbol, Promise,
+    Float32Array, Float64Array, Int32Array, Uint8Array, Uint8ClampedArray, Uint32Array, Int8Array, Uint16Array, Int16Array, ArrayBuffer, DataView,
+    Infinity, NaN, isFinite, isNaN, parseInt, parseFloat, performance: globalThis.performance,
   };
   sandbox.globalThis = sandbox;
   sandbox.self = sandbox;
   return vm.createContext(sandbox);
 }
 
-function loadCore({ viaSource = false } = {}) {
+function normalise(name) { return name.endsWith('.js') ? name : name + '.js'; }
+
+function loadCore({ viaSource = false, modules = null } = {}) {
+  const wanted = modules ? new Set(modules.map(normalise)) : null;
+  const files = ORDER.filter(f => !wanted || wanted.has(f));
+  if (wanted) {
+    for (const w of wanted) if (!ORDER.includes(w)) throw new Error('loadCore: unknown module ' + w + ' (add it to tests/core-order.json)');
+  }
   const context = makeContext();
-  for (const file of ['registry.js', ...ORDER]) {
+  for (const file of ['registry.js', ...files]) {
     const full = path.join(CORE_DIR, file);
-    if (!fs.existsSync(full)) continue; // module not written yet
+    if (!fs.existsSync(full)) {
+      if (wanted && file !== 'registry.js') throw new Error('loadCore: requested module missing on disk: ' + file);
+      continue; // module not written yet
+    }
     const src = fs.readFileSync(full, 'utf8');
     vm.runInContext(src, context, { filename: file });
   }
@@ -39,4 +54,4 @@ function loadCore({ viaSource = false } = {}) {
   return vm.runInContext('UVCore.build()', context);
 }
 
-module.exports = { loadCore };
+module.exports = { loadCore, ORDER };
