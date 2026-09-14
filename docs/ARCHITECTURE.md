@@ -1,5 +1,44 @@
 # Architecture — Advanced 3D UV Toolkit v4
 
+## 0. Implementation status (v4.0) and amendments
+
+Every module listed in §2 is implemented and covered by `node --test`, plus
+`src/core/visibility.js` (Seamster-style visibility field, docs/RESEARCH.md F30)
+and `src/gpu/baker.js` (GPU texture re-bake and UV-space maps). The UI is split
+into `src/ui/{viewport,uv-view,panels,help,textures,main}.js` instead of the
+`app.js / seam-tool.js / charts.js` split sketched in §2 (the seam tool lives in
+`viewport.js` + `main.js`). Deliberate changes to the contracts below:
+
+* **Load order**: `registry, math, solvers, mesh, visibility, segmentation, chart, parameterize, optimize, pack, metrics, projections, engine, worker-main`.
+* **Worker bootstrap** (§4.12): `workerMain` is a kernel *export*, not a global. The
+  worker source is `UVCore.source() + '(function(){var C=UVCore.build();C.workerMain(C,self);})();'`.
+  The protocol is generic: any public engine method is callable; `__methods` lists them.
+* **chart.js**: topologically degenerate faces (repeated welded vertex) are ignored by
+  Euler / loop computations; a chart with no valid face counts as a disk. Non-manifold and
+  inconsistently wound edges become cuts (`sanitizedEdges`). `cutToDisk` accepts
+  `opts.edgeWeight` and returns the final `locals`. Extra exports: `chartBoundaryLoops`, `bisectFaces`.
+* **parameterize.js**: adds `solveBFF` (free boundary, u_B = 0, conformal extension with
+  dual-harmonic fallback) and makes `'bff'` the default `initChart` method. LSCM is assembled
+  in cotan form (Dirichlet − area) and accepts user `pins`. Mean-value Tutte uses BiCGSTAB
+  (the system is non-symmetric); `solvers.js` gained `bicgstab` and `csrSubmatrix`.
+* **optimize.js**: SLIM / ARAP as specified with Anderson acceleration and pins; Progressive
+  Parameterization is not implemented (BFF starts are already low-energy).
+* **pack.js**: mirrored charts are packed as-is (listed in `mirroredCharts`) instead of being
+  un-mirrored; atlases above `workResolution` (1024) are packed on a coarser grid with padding
+  scaled up (layouts are resolution-independent); scale search fits a linear extent model
+  (≤ 5 packs).
+* **metrics.js**: seams exclude mesh boundary edges (reported as `boundaryLength3D`) and include
+  UV discontinuities; `faceChart = null` derives UV islands (`islandsFromUV`). The score is a
+  calibrated 0–100 quality score (log-normal curves per preset, hard gates, explanations —
+  RESEARCH F21) and metrics include `efficiency` (texture use, equivalent resolution — F22),
+  absolute texel density and `bake`. Extra exports: `chartBoundarySelfIntersects`, `mipSafePadding`, `logNormalScore`.
+* **engine.js**: charts whose flattened boundary self-intersects are bisected and re-flattened
+  (xatlas-style validity repair). Extra methods: `setSeamEdges`, `setSourceUV`,
+  `analyzeSource`, `seamsFromSourceUV`, `meshInfo`, `defaults`, `capabilities`. Results own
+  their buffers so the worker can transfer them. Mode `'whole'` (pelt) is supported.
+
+The rest of this document is the original contract.
+
 This document is the **contract between modules**. Engineers implementing a
 module must follow the interfaces here exactly so that independently written
 modules integrate without changes. Where this document and a research paper

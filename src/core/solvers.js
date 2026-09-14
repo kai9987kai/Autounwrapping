@@ -183,5 +183,94 @@ UVCore.define('solvers', function (C) {
     return { iterations: iter, residual: rNorm, converged: rNorm <= target };
   }
 
-  return { TripletBuilder, csrFromTriplets, csrMulVec, csrDiagonal, pcg, cgLeastSquares };
+  /* Jacobi-preconditioned BiCGSTAB for general (non-symmetric) A, e.g. the
+   * mean-value Tutte system. Solves A x = b in place (x = initial guess). */
+  function bicgstab(A, b, x, opts) {
+    opts = opts || {};
+    const n = A.n;
+    const maxIter = opts.maxIter !== undefined ? opts.maxIter : Math.min(4000, 200 + 6 * Math.ceil(Math.sqrt(n)));
+    const tol = opts.tol !== undefined ? opts.tol : 1e-10;
+    const d = csrDiagonal(A);
+    const inv = new Float64Array(n);
+    for (let i = 0; i < n; i++) inv[i] = Math.abs(d[i]) > EPS ? 1 / d[i] : 1;
+    const r = new Float64Array(n), r0 = new Float64Array(n), p = new Float64Array(n), v = new Float64Array(n);
+    const s = new Float64Array(n), t = new Float64Array(n), y = new Float64Array(n), z = new Float64Array(n);
+    csrMulVec(A, x, v);
+    let bNorm = 0;
+    for (let i = 0; i < n; i++) { r[i] = b[i] - v[i]; bNorm += b[i] * b[i]; }
+    bNorm = Math.sqrt(bNorm);
+    const target = Math.max(tol * bNorm, 1e-300);
+    r0.set(r); v.fill(0);
+    let rho = 1, alpha = 1, omega = 1, rNorm = 0;
+    for (let i = 0; i < n; i++) rNorm += r[i] * r[i];
+    rNorm = Math.sqrt(rNorm);
+    let iter = 0;
+    for (; iter < maxIter && rNorm > target; iter++) {
+      let rho1 = 0;
+      for (let i = 0; i < n; i++) rho1 += r0[i] * r[i];
+      if (Math.abs(rho1) < 1e-300) break;
+      if (iter === 0) p.set(r);
+      else {
+        const beta = (rho1 / rho) * (alpha / omega);
+        for (let i = 0; i < n; i++) p[i] = r[i] + beta * (p[i] - omega * v[i]);
+      }
+      for (let i = 0; i < n; i++) y[i] = inv[i] * p[i];
+      csrMulVec(A, y, v);
+      let r0v = 0;
+      for (let i = 0; i < n; i++) r0v += r0[i] * v[i];
+      if (Math.abs(r0v) < 1e-300) break;
+      alpha = rho1 / r0v;
+      let sNorm = 0;
+      for (let i = 0; i < n; i++) { s[i] = r[i] - alpha * v[i]; sNorm += s[i] * s[i]; }
+      if (Math.sqrt(sNorm) <= target) {
+        for (let i = 0; i < n; i++) x[i] += alpha * y[i];
+        rNorm = Math.sqrt(sNorm); iter++;
+        break;
+      }
+      for (let i = 0; i < n; i++) z[i] = inv[i] * s[i];
+      csrMulVec(A, z, t);
+      let ts = 0, tt = 0;
+      for (let i = 0; i < n; i++) { ts += t[i] * s[i]; tt += t[i] * t[i]; }
+      omega = tt > 1e-300 ? ts / tt : 0;
+      rNorm = 0;
+      for (let i = 0; i < n; i++) {
+        x[i] += alpha * y[i] + omega * z[i];
+        r[i] = s[i] - omega * t[i];
+        rNorm += r[i] * r[i];
+      }
+      rNorm = Math.sqrt(rNorm);
+      rho = rho1;
+      if (omega === 0) break;
+    }
+    return { iterations: iter, residual: rNorm, converged: rNorm <= target };
+  }
+
+  /* Principal submatrix A[idx, idx] where map[i] = new index or -1. Also
+   * returns `coupling`: CSR rows (new index) of the entries to columns NOT in
+   * the submatrix, for moving known values to the right-hand side. */
+  function csrSubmatrix(A, map, m) {
+    const { n, rowPtr, colIdx, vals } = A;
+    let nnz = 0, cnnz = 0;
+    for (let i = 0; i < n; i++) {
+      if (map[i] < 0) continue;
+      for (let p = rowPtr[i]; p < rowPtr[i + 1]; p++) { if (map[colIdx[p]] >= 0) nnz++; else cnnz++; }
+    }
+    const S = { n: m, rowPtr: new Int32Array(m + 1), colIdx: new Int32Array(nnz), vals: new Float64Array(nnz) };
+    const K = { n: m, rowPtr: new Int32Array(m + 1), colIdx: new Int32Array(cnnz), vals: new Float64Array(cnnz) };
+    const rowOf = new Int32Array(m);
+    for (let i = 0; i < n; i++) if (map[i] >= 0) rowOf[map[i]] = i;
+    let q = 0, qc = 0;
+    for (let r = 0; r < m; r++) {
+      const i = rowOf[r];
+      for (let p = rowPtr[i]; p < rowPtr[i + 1]; p++) {
+        const j = map[colIdx[p]];
+        if (j >= 0) { S.colIdx[q] = j; S.vals[q++] = vals[p]; }
+        else { K.colIdx[qc] = colIdx[p]; K.vals[qc++] = vals[p]; }
+      }
+      S.rowPtr[r + 1] = q; K.rowPtr[r + 1] = qc;
+    }
+    return { sub: S, coupling: K };
+  }
+
+  return { TripletBuilder, csrFromTriplets, csrMulVec, csrDiagonal, pcg, cgLeastSquares, bicgstab, csrSubmatrix };
 });

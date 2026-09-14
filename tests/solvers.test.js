@@ -78,3 +78,30 @@ test('cgLeastSquares solves an overdetermined system', () => {
   assert.ok(r.converged);
   for (let j = 0; j < cols; j++) assert.ok(Math.abs(x[j] - xTrue[j]) < 1e-6);
 });
+
+test('bicgstab solves a non-symmetric diagonally dominant system', () => {
+  const rnd = mulberry32(21), n = 300, tb = new C.TripletBuilder(n);
+  for (let i = 0; i < n; i++) {
+    let off = 0;
+    for (let k = 0; k < 4; k++) { const j = Math.floor(rnd() * n); if (j === i) continue; const v = -rnd(); tb.add(i, j, v); off -= v; }
+    tb.add(i, i, off + 0.5 + rnd());
+  }
+  const A = C.csrFromTriplets(tb);
+  const xTrue = new Float64Array(n).map(() => rnd() - 0.5), b = new Float64Array(n);
+  C.csrMulVec(A, xTrue, b);
+  const x = new Float64Array(n);
+  const r = C.bicgstab(A, b, x, { tol: 1e-12 });
+  assert.ok(r.converged, JSON.stringify(r));
+  for (let i = 0; i < n; i++) assert.ok(Math.abs(x[i] - xTrue[i]) < 1e-7);
+});
+
+test('csrSubmatrix extracts the principal block and the coupling rows', () => {
+  const tb = new C.TripletBuilder(3);
+  tb.add(0, 0, 4); tb.add(0, 1, -1); tb.add(0, 2, -2); tb.add(1, 1, 3); tb.add(2, 2, 5); tb.add(2, 0, -2);
+  const A = C.csrFromTriplets(tb);
+  const { sub, coupling } = C.csrSubmatrix(A, Int32Array.from([0, -1, 1]), 2);
+  assert.deepEqual(Array.from(sub.colIdx), [0, 1, 0, 1]);
+  assert.deepEqual(Array.from(sub.vals), [4, -2, -2, 5]);
+  assert.deepEqual(Array.from(coupling.colIdx), [1]);
+  assert.deepEqual(Array.from(coupling.rowPtr), [0, 1, 1]);
+});

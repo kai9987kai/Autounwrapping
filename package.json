@@ -4,10 +4,15 @@
   "description": "Browser-based UV unwrapping laboratory: chart segmentation, LSCM/Tutte flattening, SLIM/ARAP optimization, bitmap atlas packing and UV quality metrics — no build step, runs from file://",
   "private": true,
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/kai9987kai/Autounwrapping.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kai9987kai/Autounwrapping.git"
+  },
   "scripts": {
     "test": "node --test",
-    "serve": "python -m http.server 8000"
+    "serve": "node tools/serve.js"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }
