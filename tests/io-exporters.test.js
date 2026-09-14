@@ -110,3 +110,20 @@ test('CSV quoting, report stripping and UV layout drawing into a recording conte
   X.drawUVLayout(rec, { uv, faceChart: new Int32Array([0, 1]), size: 256, style: 'chart' });
   assert.deepEqual(calls, { moveTo: 2, lineTo: 4, fill: 2, stroke: 2 });
 });
+
+test('GLB export writes spec-correct glTF uvs (v-down) that the loader turns back into the same v-up layout', async () => {
+  const { P, uv } = cubeUV();
+  const blob = await X.exportGLB(P, uv, 'cube');
+  const buf = await blob.arrayBuffer();
+  const gltf = await new Promise((res, rej) => new THREE.GLTFLoader().parse(buf, '', res, rej));
+  let mesh = null;
+  gltf.scene.traverse(o => { if (o.isMesh) mesh = o; });
+  const g = mesh.geometry, idx = g.index;
+  for (let c = 0; c < 36; c++) {
+    const i = idx ? idx.getX(c) : c;
+    assert.ok(Math.abs(g.attributes.uv.getY(i) - (1 - uv[2 * c + 1])) < 1e-6, 'raw glTF v is 1 - v');
+  }
+  const lctx = loadBrowser({ three: ['GLTFLoader.js'], scripts: ['src/io/loaders.js'] });
+  const model = await lctx.UVApp.loaders.parseBuffer(buf, 'cube.glb');
+  for (let c = 0; c < 36; c++) assert.ok(Math.abs(model.originalUV[2 * c + 1] - uv[2 * c + 1]) < 1e-5, 'round-trips to v-up');
+});

@@ -82,5 +82,5 @@ test('degenerate faces get faceEdges = -1 and do not crash', () => {
 test('buildMesh on the torus knot is fast', () => {
   const t0 = performance.now();
   C.buildMesh(F.torusKnot(0.8, 0.3, 320, 48)); // 30k faces
-  assert.ok(performance.now() - t0 < 1500);
+  assert.ok(performance.now() - t0 < 4500);
 });

@@ -3,7 +3,9 @@
  *
  * Protocol (ARCHITECTURE.md §4.12; generic so new engine methods need no changes):
  *   main -> worker : { id, op, args }              op = any public engine method,
- *                                                  or '__ping' | '__methods' | '__cancelSoft'
+ *                                                  or '__ping' | '__methods'
+ *   Engine calls are synchronous inside the worker, so cancellation terminates
+ *   the worker (EngineClient.cancel). Methods starting with '_' are private.
  *   worker -> main : { type: 'ready', methods }
  *                    { id, type: 'progress', stage, done, total }   (<= 1 per 33 ms per stage)
  *                    { id, type: 'result', result }                 (typed arrays transferred)
@@ -46,20 +48,17 @@ UVCore.define('worker-main', function (C) {
     if (!scope || typeof scope.postMessage !== 'function') return null;
     const engine = new Core.UVEngine();
     const methods = publicMethods(engine);
-    let softCancel = false;
 
     scope.onmessage = async (ev) => {
       const msg = ev.data || {};
       const { id, op } = msg;
       const args = Array.isArray(msg.args) ? msg.args : [];
-      if (op === '__cancelSoft') { softCancel = true; return; }
       if (op === '__ping') { scope.postMessage({ id, type: 'result', result: 'pong' }); return; }
       if (op === '__methods') { scope.postMessage({ id, type: 'result', result: methods }); return; }
       if (typeof op !== 'string' || methods.indexOf(op) < 0) {
         scope.postMessage({ id, type: 'error', message: 'Unknown engine operation: ' + op, stack: '' });
         return;
       }
-      softCancel = false;
       const last = new Map();
       const progress = (stage, done, total) => {
         const t = Date.now(), prev = last.get(stage) || 0;
@@ -67,7 +66,7 @@ UVCore.define('worker-main', function (C) {
         last.set(stage, t);
         scope.postMessage({ id, type: 'progress', stage, done, total });
       };
-      const shouldCancel = () => softCancel;
+      const shouldCancel = () => false;
       try {
         let result = engine[op](...args, progress, shouldCancel);
         if (result && typeof result.then === 'function') result = await result;

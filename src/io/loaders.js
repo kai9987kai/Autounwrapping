@@ -9,6 +9,8 @@
  *   fromObject3D(object3D, name, format, opts?) -> ModelData
  *   detectFormat(name, arrayBuffer?) -> format | null
  * }
+ * All UVs are normalised to the v-up convention used by OBJ and the kernel (glTF TEXCOORD v is flipped on load);
+ * materials record the colour space of their factor (glTF factors are linear, MTL Kd is treated as sRGB).
  * ModelData = { positions: Float32Array(9F), normals: Float32Array(9F)|null, originalUV: Float32Array(6F)|null,
  *               faceMaterial: Uint16Array(F)|null, materials: [{ name, color:[r,g,b], map: THREE.Texture|null }],
  *               name, format, meshCount, faceCount, droppedDegenerate, bbox: {min,max}, warnings: string[] }
@@ -20,7 +22,21 @@
   const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'ktx2', 'basis'];
 
   const extOf = (name) => { const m = /\.([a-z0-9]+)$/i.exec(name || ''); return m ? m[1].toLowerCase() : ''; };
-  const baseName = (url) => decodeURIComponent(String(url).split(/[\\/]/).pop().split('?')[0]);
+  /* File name of a path/URL. Decoding is best-effort: MTL/OBJ paths are plain paths and may contain '%'. */
+  const rawBaseName = (url) => String(url).split(/[\\/]/).pop().split('?')[0];
+  const baseName = (url) => { const raw = rawBaseName(url); try { return decodeURIComponent(raw); } catch (e) { return raw; } };
+  /* MTL texture statement: skip option flags and keep the (possibly space-containing) file name. */
+  const MTL_OPTION_ARGS = { '-blendu': 1, '-blendv': 1, '-cc': 1, '-clamp': 1, '-bm': 1, '-boost': 1, '-imfchan': 1, '-type': 1, '-texres': 1, '-mm': 2, '-o': 3, '-s': 3, '-t': 3 };
+  function mtlMapPath(parts) {
+    let i = 1;
+    while (i < parts.length && MTL_OPTION_ARGS[parts[i].toLowerCase()] !== undefined) {
+      const n = MTL_OPTION_ARGS[parts[i].toLowerCase()];
+      i++;
+      let taken = 0;
+      while (taken < n && i < parts.length && /^-?\d*\.?\d+(e-?\d+)?$|^(on|off)$/i.test(parts[i])) { i++; taken++; }
+    }
+    return parts.slice(i).join(' ');
+  }
 
   function detectFormat(name, buffer) {
     const ext = extOf(name);
@@ -63,7 +79,7 @@
       if (key === 'newmtl') { cur = out[parts.slice(1).join(' ')] = { color: [0.8, 0.8, 0.8], map: null }; }
       else if (!cur) continue;
       else if (key === 'kd' && parts.length >= 4) cur.color = [parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])];
-      else if (key === 'map_kd') cur.map = parts[parts.length - 1];
+      else if (key === 'map_kd') { const path = mtlMapPath(parts); if (path) cur.map = path; }
     }
     return out;
   }
@@ -71,7 +87,12 @@
   function loadTexture(url) {
     return new Promise((resolve) => {
       if (!url || typeof document === 'undefined') { resolve(null); return; }
-      new THREE.TextureLoader().load(url, (t) => { t.flipY = true; if ('encoding' in t) t.encoding = THREE.sRGBEncoding; resolve(t); }, undefined, () => resolve(null));
+      new THREE.TextureLoader().load(url, (t) => {
+        t.flipY = true;
+        t.wrapS = t.wrapT = THREE.RepeatWrapping; // OBJ/MTL textures tile by default
+        if ('encoding' in t) t.encoding = THREE.sRGBEncoding;
+        resolve(t);
+      }, undefined, () => resolve(null));
     });
   }
 
@@ -92,7 +113,7 @@
     if (!main) throw new Error('Unsupported file type. Supported: ' + supportedExtensions.map(e => '.' + e).join(', ') + '.');
     const urls = new Map();
     const urlFor = (name) => {
-      const f = byName.get(name) || list.find(x => x.name.toLowerCase() === name.toLowerCase());
+      const f = byName.get(name) || list.find(x => x.name.toLowerCase() === String(name).toLowerCase());
       if (!f) return null;
       if (!urls.has(f.name)) urls.set(f.name, URL.createObjectURL(f));
       return urls.get(f.name);
@@ -100,7 +121,10 @@
     try {
       const buf = await readAs(main, 'buffer');
       const format = detectFormat(main.name, buf);
-      return await parseBuffer(buf, main.name, format, Object.assign({}, opts, { resolveURL: (u) => urlFor(baseName(u)), sidecarText: async (name) => { const f = byName.get(name); return f ? readAs(f, 'text') : null; } }));
+      return await parseBuffer(buf, main.name, format, Object.assign({}, opts, {
+        resolveURL: (u) => urlFor(rawBaseName(u)) || urlFor(baseName(u)),
+        sidecarText: async (name) => { const f = byName.get(name) || list.find(x => x.name.toLowerCase() === String(name).toLowerCase()); return f ? readAs(f, 'text') : null; }
+      }));
     } finally {
       // textures load asynchronously from blob URLs; revoke after they had time to decode
       setTimeout(() => { for (const u of urls.values()) URL.revokeObjectURL(u); }, 30000);
@@ -123,7 +147,7 @@
       object = new THREE.OBJLoader().parse(text);
       const mtlName = /^\s*mtllib\s+(.+)$/m.exec(text);
       if (mtlName && opts.sidecarText) {
-        const mtlText = await opts.sidecarText(baseName(mtlName[1].trim()));
+        const mtlText = await opts.sidecarText(rawBaseName(mtlName[1].trim()));
         if (mtlText) {
           const mtl = parseMTL(mtlText);
           const pending = [];
@@ -134,7 +158,7 @@
               const def = m && mtl[m.name];
               if (!def) continue;
               m.color && m.color.setRGB(def.color[0], def.color[1], def.color[2]);
-              if (def.map && opts.resolveURL) pending.push(loadTexture(opts.resolveURL(def.map)).then(t => { if (t) { m.map = t; m.needsUpdate = true; } }));
+              if (def.map && opts.resolveURL) pending.push(loadTexture(opts.resolveURL(rawBaseName(def.map))).then(t => { if (t) { m.map = t; m.needsUpdate = true; } }));
             }
           });
           await Promise.all(pending);
@@ -193,11 +217,25 @@
       if (matIndex.has(m.uuid)) return matIndex.get(m.uuid);
       const id = materials.length;
       matIndex.set(m.uuid, id);
-      materials.push({ name: m.name || ('material_' + id), color: m.color ? [m.color.r, m.color.g, m.color.b] : [0.8, 0.8, 0.8], map: m.map || null });
+      materials.push({ name: m.name || ('material_' + id), color: m.color ? [m.color.r, m.color.g, m.color.b] : [0.8, 0.8, 0.8], colorSpace: gltf ? 'linear' : 'srgb', map: m.map || null });
       return id;
     };
     let f = 0;
     let hasNormals = true;
+    const gltf = format === 'gltf' || format === 'glb';
+    // normalized integer attributes (KHR_mesh_quantization): three r141 getX() returns raw integers
+    const comp = (attr, vi, c) => {
+      const v = c === 0 ? attr.getX(vi) : c === 1 ? attr.getY(vi) : attr.getZ(vi);
+      if (!attr.normalized) return v;
+      const arr = attr.isInterleavedBufferAttribute ? attr.data.array : attr.array;
+      if (arr instanceof Uint8Array || arr instanceof Uint8ClampedArray) return v / 255;
+      if (arr instanceof Uint16Array) return v / 65535;
+      if (arr instanceof Uint32Array) return v / 4294967295;
+      if (arr instanceof Int8Array) return Math.max(v / 127, -1);
+      if (arr instanceof Int16Array) return Math.max(v / 32767, -1);
+      if (arr instanceof Int32Array) return Math.max(v / 2147483647, -1);
+      return v;
+    };
     const nm = new THREE.Matrix3();
     for (const o of meshes) {
       const g = o.geometry, pos = g.attributes.position, nor = g.attributes.normal, uv = g.attributes.uv, idx = g.index;
@@ -219,18 +257,18 @@
         for (let k = 0; k < 3; k++) {
           const kk = flip && k > 0 ? 3 - k : k;          // swap corners 1 and 2 under mirroring
           const vi = idx ? idx.getX(3 * t + kk) : 3 * t + kk;
-          const x = pos.getX(vi), y = pos.getY(vi), z = pos.getZ(vi);
+          const x = comp(pos, vi, 0), y = comp(pos, vi, 1), z = comp(pos, vi, 2);
           const o9 = 9 * f + 3 * k;
           P[o9] = e[0] * x + e[4] * y + e[8] * z + e[12];
           P[o9 + 1] = e[1] * x + e[5] * y + e[9] * z + e[13];
           P[o9 + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
           if (nor) {
-            const nx = nor.getX(vi), ny = nor.getY(vi), nz = nor.getZ(vi);
+            const nx = comp(nor, vi, 0), ny = comp(nor, vi, 1), nz = comp(nor, vi, 2);
             let ax = n[0] * nx + n[3] * ny + n[6] * nz, ay = n[1] * nx + n[4] * ny + n[7] * nz, az = n[2] * nx + n[5] * ny + n[8] * nz;
             const l = Math.hypot(ax, ay, az) || 1;
             N[o9] = ax / l; N[o9 + 1] = ay / l; N[o9 + 2] = az / l;
           }
-          if (U) { U[6 * f + 2 * k] = uv.getX(vi); U[6 * f + 2 * k + 1] = uv.getY(vi); }
+          if (U) { U[6 * f + 2 * k] = comp(uv, vi, 0); const v = comp(uv, vi, 1); U[6 * f + 2 * k + 1] = gltf ? 1 - v : v; }
         }
         f++;
       }

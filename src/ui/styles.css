@@ -118,7 +118,7 @@ details.card[open] > summary { margin-bottom: 8px; }
 .uvwrap { flex: 1; min-height: 0; position: relative; }
 #uv-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
 #uv-canvas.panning { cursor: grabbing; }
-.splitter { background: var(--line); cursor: col-resize; }
+.splitter { background: var(--line); cursor: col-resize; touch-action: none; }
 .splitter:hover, .splitter.dragging { background: var(--accent); }
 
 /* ---------- score ---------- */
@@ -197,7 +197,7 @@ table.compare td.better { color: var(--good); } table.compare td.worse { color: 
   body { overflow: auto; }
   .app { grid-template-columns: 1fr; }
   .stage { order: -1; height: 72vh; }
-  .stage.layout-split { grid-template-columns: 1fr; grid-template-rows: 1fr 6px 1fr; }
+  .stage.layout-split { grid-template-columns: 1fr; grid-template-rows: var(--split-rows, 1fr) 6px 1fr; }
   .splitter { cursor: row-resize; }
   .sidebar { overflow: visible; border: 0 !important; }
   .toolbar .group { border-left: 0; padding-left: 0; }

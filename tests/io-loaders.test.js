@@ -132,3 +132,56 @@ test('detectFormat by extension and magic; errors for unknown files; MTL parsing
   assert.equal(mtl.red.map, 'tex/red.png');
   await assert.rejects(L.parseBuffer('v 0 0 0\n', 'empty.obj', 'obj'), /No triangle meshes|degenerate/);
 });
+
+function quadGltf({ normalizedUV }) {
+  // quad in XY facing +z; glTF uv convention: v = 0 at the TOP of the image
+  const pos = new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]);
+  const uvF = [0, 1, 1, 1, 1, 0, 0, 0];            // bottom-left vertex -> v = 1 in glTF
+  const uv = normalizedUV ? new Uint16Array(uvF.map(v => v * 65535)) : new Float32Array(uvF);
+  const idx = new Uint16Array([0, 1, 2, 0, 2, 3]);
+  const pad4 = (n) => (n + 3) & ~3;
+  const chunks = [Buffer.from(pos.buffer), Buffer.from(uv.buffer), Buffer.from(idx.buffer)];
+  const offs = []; let o = 0;
+  const parts = chunks.map(c => { offs.push(o); const p = Buffer.alloc(pad4(c.length)); c.copy(p); o += p.length; return p; });
+  const bin = Buffer.concat(parts);
+  return JSON.stringify({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: bin.length, uri: 'data:application/octet-stream;base64,' + bin.toString('base64') }],
+    bufferViews: chunks.map((c, i) => ({ buffer: 0, byteOffset: offs[i], byteLength: c.length })),
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 4, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+      normalizedUV ? { bufferView: 1, componentType: 5123, normalized: true, count: 4, type: 'VEC2' } : { bufferView: 1, componentType: 5126, count: 4, type: 'VEC2' },
+      { bufferView: 2, componentType: 5123, count: 6, type: 'SCALAR' }
+    ],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, indices: 2 }] }],
+    nodes: [{ mesh: 0 }], scenes: [{ nodes: [0] }], scene: 0
+  });
+}
+function signedUV(uv, f) {
+  const i = 6 * f;
+  return (uv[i + 2] - uv[i]) * (uv[i + 5] - uv[i + 1]) - (uv[i + 4] - uv[i]) * (uv[i + 3] - uv[i + 1]);
+}
+
+test('glTF uvs are normalised to v-up (a correctly mapped glTF is not "flipped"), quantized uvs are denormalised', async () => {
+  for (const normalizedUV of [false, true]) {
+    const m = await L.parseBuffer(quadGltf({ normalizedUV }), 'quad.gltf');
+    assert.equal(m.faceCount, 2);
+    for (const v of m.originalUV) assert.ok(v >= -1e-6 && v <= 1 + 1e-6, 'uv in [0,1]: ' + v);
+    // bottom-left corner (0,0,0) must map to uv (0,0) in v-up convention
+    assert.ok(Math.abs(m.originalUV[0]) < 1e-4 && Math.abs(m.originalUV[1]) < 1e-4, Array.from(m.originalUV.subarray(0, 2)).join(','));
+    assert.ok(signedUV(m.originalUV, 0) > 0 && signedUV(m.originalUV, 1) > 0, 'positively oriented');
+    assert.equal(m.materials[0].colorSpace, 'linear');
+  }
+});
+
+test('MTL map paths keep spaces and skip option flags; % in file names does not abort loading', async () => {
+  const mtl = L.parseMTL(['newmtl a', 'map_Kd -s 2 2 1 -clamp on tex/wood grain.png', 'newmtl b', 'map_Kd 100%_rough.png'].join('\n'));
+  assert.equal(mtl.a.map, 'tex/wood grain.png');
+  assert.equal(mtl.b.map, '100%_rough.png');
+  const obj = 'mtllib 50%off.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl a\nf 1 2 3\n';
+  let asked = null;
+  const m = await L.parseBuffer(obj, 'a.obj', 'obj', { sidecarText: async (n) => { asked = n; return 'newmtl a\nKd 1 0 0\n'; } });
+  assert.equal(asked, '50%off.mtl');
+  assert.equal(m.faceCount, 1);
+  assert.equal(m.materials[0].colorSpace, 'srgb');
+});

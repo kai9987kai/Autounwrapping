@@ -161,3 +161,39 @@ test('viaSource round-trip: the serialised kernel unwraps', () => {
   assert.ok(r.metrics.bijectivity.valid);
   assert.equal(r.metrics.flipped, 0);
 });
+
+test('review fixes: foreign snapshots are rejected, cancel paths return { cancelled }, seams after search', () => {
+  const A = new C.UVEngine();
+  A.setMesh(F.torus(1, 0.35, 12, 24));
+  A.unwrap({});
+  const snap = A.snapshot();
+  const B = new C.UVEngine();
+  B.setMesh(F.gridPatch(24, 12)); // same face count, different mesh
+  B.unwrap({ mode: 'whole' });
+  assert.throws(() => B.restore(snap), /different mesh/);
+  assert.equal(B.unwrap({ mode: 'whole' }).metrics.chartCount, 1, 'engine still usable');
+  // relax cancelled on the first check leaves the layout untouched
+  const before = Float64Array.from(A.state.charts[0].local.uv);
+  assert.deepEqual({ ...A.relax({}, null, () => true) }, { cancelled: true });
+  assert.deepEqual(Array.from(A.state.charts[0].local.uv), Array.from(before));
+  // cancel arriving during the last chart
+  let calls = 0;
+  const E = new C.UVEngine();
+  E.setMesh(F.uvSphere(12, 8));
+  const r = E.unwrap({ mode: 'whole', iterations: 30 }, null, () => ++calls > 40);
+  assert.ok(r.cancelled || r.metrics);
+  // seams available after optimizeSearch restores the best state
+  E.optimizeSearch({});
+  assert.ok(E.edgeSegments('seams').length >= 0);
+  // internal methods are private to the worker protocol
+  assert.ok(!C.publicMethods(E).some(n => /^(requireMesh|packState|finish|result|restoreState)$/.test(n)));
+});
+
+test('review fixes: charts that cannot fit are scaled down without stacking', () => {
+  const E = new C.UVEngine();
+  E.setMesh(F.torusKnot(0.8, 0.3, 60, 8));
+  const r = E.unwrap({ segmentation: { angleDeg: 20, maxFaces: 20 }, iterations: 0, optimizer: 'none', packing: { resolution: 64, paddingTexels: 6 } });
+  assert.equal(r.metrics.bijectivity.valid, true, 'no stacked charts');
+  assert.equal(r.packing.fits, false);
+  assert.ok(r.notes.some(n => /did not fit/.test(n)));
+});

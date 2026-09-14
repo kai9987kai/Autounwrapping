@@ -45,7 +45,7 @@
   }
   function setBusy(on, label) {
     state.busy = on;
-    for (const id of ['btn-unwrap', 'btn-relax', 'btn-repack', 'btn-search', 'btn-open', 'btn-bake', 'btn-benchmark']) if ($(id)) $(id).disabled = on || ($(id).dataset.needs === 'result' && !state.result);
+    for (const id of ['btn-unwrap', 'btn-relax', 'btn-repack', 'btn-search', 'btn-open', 'btn-bake', 'btn-benchmark', 'btn-pin']) if ($(id)) $(id).disabled = on || ($(id).dataset.needs === 'result' && !state.result);
     $('btn-cancel').hidden = !on;
     if (on) { setStatus(label || 'Working…'); setProgress(0, true); }
     else { setProgress(0, false); updateButtons(); }
@@ -156,7 +156,7 @@
     U.panels.pushHistory(r.metrics);
     if (r.notes && r.notes.length) U.panels.log(r.notes);
     const m = r.metrics;
-    U.panels.log(opts.label || 'Result' + ': score ' + m.score.score + ', ' + m.chartCount + ' charts, SD ' + m.sdMean.toFixed(4) + ', texture use ' + (100 * m.efficiency.textureEff).toFixed(1) + '%, ' + Math.round(r.timings.total) + ' ms');
+    U.panels.log((opts.label || 'Result') + ': score ' + m.score.score + ', ' + m.chartCount + ' charts, SD ' + m.sdMean.toFixed(4) + ', texture use ' + (100 * m.efficiency.textureEff).toFixed(1) + '%, ' + Math.round(r.timings.total) + ' ms');
     setStatus((opts.label || 'Done') + ' — score ' + m.score.score + ' · ' + m.chartCount + ' charts · ' + Math.round(r.timings.total) + ' ms');
     refreshManualSeams();
     updateButtons();
@@ -193,21 +193,57 @@
     } catch (e) { /* nothing to snapshot */ }
   }
 
+  /* Drops the current result from every view (engine has no result any more). */
+  function clearResult() {
+    state.result = null;
+    state.analysis = null;
+    state.selected = -1;
+    state.viewport.setResult(null);
+    state.viewport.highlightChart(-1);
+    state.viewport.setHeat($('view-heat').value, null);
+    state.uvView.setData(null);
+    renderPanels(null);
+    updateButtons();
+  }
+
+  async function takeSnapshot(label) {
+    try { return { snap: await state.client.snapshot(), label }; } catch (e) { return null; }
+  }
+  function commitUndo(entry) {
+    if (!entry) return;
+    state.undo.push(entry);
+    if (state.undo.length > 15) state.undo.shift();
+    state.redo = [];
+  }
+
   async function run(label, fn, opts) {
     if (state.busy) return null;
     if (!state.model) { toast('Load a model first.', 'warn'); return null; }
     opts = opts || {};
     setBusy(true, label + '…');
+    let entry = null;
     try {
-      if (opts.undo !== false) await pushUndo(label);
+      if (opts.undo !== false) entry = await takeSnapshot(label);
       const t0 = performance.now();
       const r = await fn();
+      if (r && (r.metrics || r.best)) commitUndo(entry);
       if (r && r.metrics) applyResult(r, { label });
       else if (r && r.best) applyResult(r.best, { label });
       if (opts.toast !== false && r && (r.metrics || r.best)) toast(label + ' finished in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s — score ' + (r.metrics || r.best.metrics).score.score, 'success', 2500);
       return r;
     } catch (err) {
-      if (err && err.name === 'CancelError') { toast('Cancelled.', 'warn'); setStatus('Cancelled'); state.undo.pop(); }
+      if (err && err.name === 'CancelError') {
+        toast('Cancelled.', 'warn');
+        setStatus('Cancelled');
+        // a worker cancel restarts the engine with only mesh + seams: bring the previous result back
+        if (state.client.mode === 'worker') {
+          try {
+            await state.client.ready;
+            const back = entry ? await state.client.restore(entry.snap) : null;
+            if (back) applyResult(back, { label: 'Cancelled — previous result kept' }); else clearResult();
+          } catch (e) { clearResult(); }
+        }
+      }
       else { console.error(err); toast(label + ' failed: ' + (err && err.message ? err.message : err), 'error'); setStatus(label + ' failed'); }
       return null;
     } finally {
@@ -244,7 +280,7 @@
       const prev = state.undo.pop();
       state.redo.push({ snap: current, label: prev.label });
       const r = await state.client.restore(prev.snap);
-      if (r) applyResult(r, { label: 'Undo ' + prev.label }); else { state.result = null; renderPanels(null); }
+      if (r) applyResult(r, { label: 'Undo ' + prev.label }); else clearResult();
       await refreshManualSeams();
     } catch (e) { toast('Undo failed: ' + e.message, 'error'); } finally { setBusy(false); }
   }
@@ -256,7 +292,7 @@
       const next = state.redo.pop();
       state.undo.push({ snap: current, label: next.label });
       const r = await state.client.restore(next.snap);
-      if (r) applyResult(r, { label: 'Redo ' + next.label });
+      if (r) applyResult(r, { label: 'Redo ' + next.label }); else clearResult();
       await refreshManualSeams();
     } catch (e) { toast('Redo failed: ' + e.message, 'error'); } finally { setBusy(false); }
   }
@@ -317,6 +353,10 @@
     state.undo = []; state.redo = [];
     state.viewport.setModel(model);
     state.viewport.setBakedTexture(null);
+    state.uvView.setBackgroundImage(null);
+    if ($('uv-bg').value === 'baked') { $('uv-bg').value = 'grid'; state.uvView.setStyle({ background: 'grid' }); }
+    state.compare = [];
+    U.panels.renderCompare([], restoreCompare, removeCompare);
     if ($('view-texture').value === 'baked' || $('view-texture').value === 'original') { $('view-texture').value = 'checker'; state.viewport.setTextureMode('checker'); }
     state.uvView.setData(null);
     renderPanels(null);
@@ -426,6 +466,7 @@
         X.downloadBlob(await X.makeZip(entries), name + '_uv_bundle.zip');
         setStatus('Bundle exported');
       } else if (kind === 'project') {
+        if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
         const snapshot = await state.client.snapshot();
         X.downloadBlob(X.saveProject({ name: model.name, positions: model.positions, normals: model.normals, originalUV: model.originalUV, faceMaterial: model.faceMaterial, settings: state.settings, presetKey: state.presetKey, snapshot }), name + '.uvtk.json');
       }
@@ -441,24 +482,35 @@
   }
 
   async function loadProjectFile(file) {
+    if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
     try {
       const p = await U.exporters.loadProject(file);
       const model = { positions: p.positions, normals: p.normals || null, originalUV: p.originalUV || null, faceMaterial: p.faceMaterial || null, materials: [{ name: 'material', color: [0.8, 0.8, 0.8], map: null }], name: p.name || 'project', format: 'project', meshCount: 1, faceCount: p.positions.length / 9, droppedDegenerate: 0, warnings: [] };
       if (p.settings) { state.settings = p.settings; state.presetKey = p.presetKey || 'game_hero'; syncControls(); }
       state.model = model;
+      state.result = null; state.analysis = null; state.baked = null; state.bakeStale = false; state.visCache = null;
+      state.undo = []; state.redo = []; state.compare = [];
       state.viewport.setModel(model);
+      state.viewport.setBakedTexture(null);
+      state.uvView.setBackgroundImage(null);
+      state.uvView.setData(null);
+      renderPanels(null);
+      U.panels.renderCompare([], restoreCompare, removeCompare);
+      $('model-chip').title = model.name + ' (project)';
       setBusy(true, 'Restoring project…');
       state.meshInfo = await state.client.setMesh(model.positions);
       if (model.originalUV) await state.client.setSourceUV(model.originalUV);
       const r = p.snapshot ? await state.client.restore(p.snapshot) : await state.client.unwrap(state.settings);
       setBusy(false);
       $('model-chip').textContent = model.name + ' · ' + model.faceCount.toLocaleString() + ' tris';
+      $('status-mesh').textContent = state.meshInfo.faceCount.toLocaleString() + ' faces · ' + state.meshInfo.componentCount + ' part(s)';
       if (r) applyResult(r, { label: 'Project restored' });
       state.undo = []; state.redo = [];
       updateButtons();
       toast('Project loaded.', 'success');
     } catch (e) {
       setBusy(false);
+      clearResult();
       toast('Could not load project: ' + e.message, 'error');
     }
   }
@@ -485,6 +537,7 @@
     return { label, description, score: m.score.score, charts: m.chartCount, sd: m.sdMean, angle: m.angleMeanDeg, use: 100 * m.efficiency.textureEff, seams: m.seamLength3D, ms: r.timings ? r.timings.total : 0, snap: null, summary: { score: m.score.score, charts: m.chartCount, sdMean: m.sdMean } };
   }
   async function pinCurrent() {
+    if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
     if (!state.result) { toast('Nothing to pin yet.', 'warn'); return; }
     const s = state.settings, e = compareEntry(state.result, '#' + (state.compare.length + 1) + ' ' + s.mode + ' ' + s.segmentation.angleDeg + '°', JSON.stringify({ mode: s.mode, parameterizer: s.parameterizer, optimizer: s.optimizer, iterations: s.iterations, angle: s.segmentation.angleDeg, packing: s.packing }));
     try { e.snap = await state.client.snapshot(); e.settings = clone(s); } catch (err) { /* ignore */ }
@@ -519,14 +572,21 @@
       const avg = rows.reduce((s, r) => s + r.score, 0) / rows.length;
       toast('Benchmark done: mean score ' + avg.toFixed(1) + ' over ' + rows.length + ' models (CSV downloaded).', 'success', 6000);
       U.panels.log(rows.map(r => r.model + ': ' + r.score + ' (' + r.ms + ' ms)'));
-    } catch (e) { toast('Benchmark failed: ' + e.message, 'error'); }
+    } catch (e) { toast(e && e.name === 'CancelError' ? 'Benchmark cancelled.' : 'Benchmark failed: ' + e.message, e && e.name === 'CancelError' ? 'warn' : 'error'); }
     finally {
-      if (current) {
-        await state.client.setMesh(current.positions);
-        if (current.originalUV) await state.client.setSourceUV(current.originalUV);
-        if (snap) { const r = await state.client.restore(snap); if (r) applyResult(r, { label: 'Restored' }); }
+      try {
+        if (current) {
+          await state.client.ready;
+          await state.client.setMesh(current.positions);
+          if (current.originalUV) await state.client.setSourceUV(current.originalUV);
+          if (snap) { const r = await state.client.restore(snap); if (r) applyResult(r, { label: 'Restored' }); else clearResult(); }
+        }
+      } catch (e) {
+        toast('Could not restore the model after the benchmark: ' + e.message, 'error');
+        clearResult();
+      } finally {
+        setBusy(false);
       }
-      setBusy(false);
     }
   }
 
@@ -618,13 +678,19 @@
     const split = $('splitter'), stage = $('stage');
     split.addEventListener('pointerdown', (e) => {
       split.classList.add('dragging'); split.setPointerCapture(e.pointerId);
+      const stacked = window.matchMedia('(max-width: 1024px)').matches;
       const move = (ev) => {
         const r = stage.getBoundingClientRect();
-        const frac = Math.max(0.15, Math.min(0.85, (ev.clientX - r.left) / r.width));
-        stage.style.setProperty('--split', frac / (1 - frac) + 'fr');
+        const t = stacked ? (ev.clientY - r.top) / r.height : (ev.clientX - r.left) / r.width;
+        const frac = Math.max(0.15, Math.min(0.85, t));
+        stage.style.setProperty(stacked ? '--split-rows' : '--split', frac / (1 - frac) + 'fr');
       };
-      const up = () => { split.classList.remove('dragging'); split.removeEventListener('pointermove', move); split.removeEventListener('pointerup', up); };
-      split.addEventListener('pointermove', move); split.addEventListener('pointerup', up);
+      const up = () => {
+        split.classList.remove('dragging');
+        for (const [ev, fn] of [['pointermove', move], ['pointerup', up], ['pointercancel', up], ['lostpointercapture', up]]) split.removeEventListener(ev, fn);
+      };
+      split.addEventListener('pointermove', move);
+      for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) split.addEventListener(ev, up);
     });
     $('btn-theme').addEventListener('click', () => {
       const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
@@ -673,8 +739,8 @@
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (k === 'escape') { if (state.busy) state.client.cancel(); else if (seamTool.getAttribute('aria-pressed') === 'true') setSeamTool(false); }
       else if (k === 'u') runUnwrap();
-      else if (k === 'r') runRelax();
-      else if (k === 'p') runRepack();
+      else if (k === 'r' && !$('btn-relax').disabled) runRelax();
+      else if (k === 'p' && !$('btn-repack').disabled) runRepack();
       else if (k === 'o') $('file-input').click();
       else if (k === 's') setSeamTool(seamTool.getAttribute('aria-pressed') !== 'true');
       else if (k === 'f') state.viewport.frame();

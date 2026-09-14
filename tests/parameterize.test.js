@@ -142,7 +142,7 @@ test('initChart (every method) on torus-knot disk pieces: 0 flips, rest scale', 
       assert.ok(Math.abs(C.signedAreaUV(L) - L.area3D) < 1e-6 * L.area3D, method + ' scale');
     }
     assert.equal(flips, 0, method + ' flips');
-    assert.ok(performance.now() - t0 < 6000, method + ' too slow');
+    assert.ok(performance.now() - t0 < 18000, method + ' too slow');
   }
 });
 

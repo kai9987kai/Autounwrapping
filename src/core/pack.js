@@ -153,7 +153,7 @@ UVCore.define('pack', function (C) {
       // Fat triangles' partially covered boundary texels are within the 1-texel
       // bilinear dilation applied by the caller (allEdges forces tracing).
       const l2 = Math.max((X[1] - X[0]) ** 2 + (Y[1] - Y[0]) ** 2, (X[2] - X[1]) ** 2 + (Y[2] - Y[1]) ** 2, (X[0] - X[2]) ** 2 + (Y[0] - Y[2]) ** 2);
-      if (allEdges || Math.abs(area) < 2 * Math.sqrt(l2)) {
+      if (allEdges || Math.abs(area) <= 2 * Math.sqrt(l2)) {
         markSeg(X[0], Y[0], X[1], Y[1]); markSeg(X[1], Y[1], X[2], Y[2]); markSeg(X[2], Y[2], X[0], Y[0]);
       }
       if (Math.abs(area) < 1e-9) continue;
@@ -462,6 +462,7 @@ UVCore.define('pack', function (C) {
         res.resolution = R;
         res.workResolution = R / k;
         res.overlapTexels *= k * k;
+        res.effectivePadding *= k;
         return res;
       }
     }
@@ -483,7 +484,9 @@ UVCore.define('pack', function (C) {
     let qa = 0, qb = 0;
     for (const pc of prepared) { qa += Math.max(pc.extX * pc.extY, 1e-30); qb += o2 * (pc.extX + pc.extY); }
     const qc = o2 * o2 * n - 0.8 * R * R;
-    let D = qc < 0 ? (-qb + Math.sqrt(qb * qb - 4 * qa * qc)) / (2 * qa) : 1e-3 / Math.sqrt(qa);
+    // positive root of qa·D² + qb·D + qc = 0 in its cancellation-free form
+    let D = qc < 0 ? (-2 * qc) / (qb + Math.sqrt(qb * qb - 4 * qa * qc)) : 1e-3 / Math.sqrt(qa);
+    if (!(D > 0) || !isFinite(D)) D = 1;
     let lo = null, hi = null, packs = 0;
     let run = packer(prepared, order, D, opts); packs++;
     let lastD = D;
@@ -515,9 +518,22 @@ UVCore.define('pack', function (C) {
     }
     if (run && fits(run) && (!lo || D > lo.D)) lo = { D, run };
     if (!lo) {
-      // keep shrinking until something fits
-      while (!(run && fits(run)) && packs < 40) { D *= 0.8; run = packer(prepared, order, D, opts); packs++; lastD = D; }
-      lo = { D, run };
+      // keep shrinking until something fits; padding alone can make that impossible
+      let bestRun = run, bestD = D, prevExt = extOf(run);
+      while (!(run && fits(run)) && packs < 24) {
+        D *= 0.7;
+        run = packer(prepared, order, D, opts); packs++; lastD = D;
+        const e = extOf(run);
+        if (run && e < extOf(bestRun)) { bestRun = run; bestD = D; }
+        if (run && e >= 0.99 * prevExt) break; // extent no longer shrinks with the scale
+        prevExt = e;
+      }
+      if (run && fits(run)) lo = { D, run };
+      else {
+        if (lastD !== bestD) { run = packer(prepared, order, bestD, opts); packs++; lastD = bestD; }
+        if (!run) throw new Error('packCharts: charts cannot be placed (a single chart exceeds the working atlas).');
+        lo = { D: bestD, run };
+      }
     }
     // ---- optional randomised restarts at the chosen scale
     let restarts = 0;
@@ -547,10 +563,14 @@ UVCore.define('pack', function (C) {
   /* Final UVs, transforms and overlap verification for a completed pass. */
   function finalize(prepared, run, D, opts, n, mirroredCharts, restarts, packs, progress) {
     const R = opts.resolution;
+    if (!run) throw new Error('packCharts: no valid placement.');
     const { place, extW, extH } = run;
-    // ---- final UVs, transforms, verification
+    // A layout that could not fit (padding-dominated) is scaled down as a whole: still overlap-free,
+    // with proportionally less padding, instead of clamping charts onto each other.
+    const S = Math.max(R, extW, extH);
+    const fitsR = S === R;
     const packedUV = new Array(n), rects = new Array(n), transforms = new Array(n);
-    const verify = makeBits(2 * R + 64, 2 * R + 64);
+    const verify = makeBits(Math.max(2 * R, S) + 64, Math.max(2 * R, S) + 64);
     let overlapTexels = 0, rawTexels = 0, paddedTexels = 0, exactArea = 0;
     for (let ci = 0; ci < n; ci++) {
       const pc = prepared[ci], pl = place[ci], imgs = pc.__imgs;
@@ -563,8 +583,8 @@ UVCore.define('pack', function (C) {
       let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
       for (let i = 0; i < pc.nVerts; i++) {
         const cx = (pc.P[2 * i] - pc.minX) * D + o, cy = (pc.P[2 * i + 1] - pc.minY) * D + o;
-        const u = (pl.x + tkx + rc * cx - rs * cy) / R, v = (pl.y + tky + rs * cx + rc * cy) / R;
-        out[2 * i] = Math.min(1, Math.max(0, u)); out[2 * i + 1] = Math.min(1, Math.max(0, v));
+        const u = (pl.x + tkx + rc * cx - rs * cy) / S, v = (pl.y + tky + rs * cx + rc * cy) / S;
+        out[2 * i] = u < 0 ? 0 : u > 1 ? 1 : u; out[2 * i + 1] = v < 0 ? 0 : v > 1 ? 1 : v; // float guard only
       }
       for (let t = 0; t < pc.tris.length; t++) {
         const i = pc.tris[t];
@@ -573,10 +593,10 @@ UVCore.define('pack', function (C) {
       }
       packedUV[ci] = out;
       rects[ci] = isFinite(mnx) ? { x: mnx, y: mny, w: mxx - mnx, h: mxy - mny } : { x: 0, y: 0, w: 0, h: 0 };
-      const scale = pc.s * D / R, rotation = pc.theta + k * Math.PI / 2;
+      const scale = pc.s * D / S, rotation = pc.theta + k * Math.PI / 2;
       // translation: image of uv = 0
       const c0x = -pc.minX * D + o, c0y = -pc.minY * D + o;
-      transforms[ci] = { scale, rotation, tx: (pl.x + tkx + rc * c0x - rs * c0y) / R, ty: (pl.y + tky + rs * c0x + rc * c0y) / R, mirrored: pc.mirrored };
+      transforms[ci] = { scale, rotation, tx: (pl.x + tkx + rc * c0x - rs * c0y) / S, ty: (pl.y + tky + rs * c0x + rc * c0y) / S, mirrored: pc.mirrored };
       exactArea += pc.areaRest * D * D;
       if (imgs.get) {
         const im = imgs.get(k);
@@ -590,10 +610,11 @@ UVCore.define('pack', function (C) {
     if (progress) progress('pack', 10, 10);
     return {
       packedUV, rects, transforms,
-      coverage: Math.min(1, paddedTexels / (R * R)),
-      chartCoverage: Math.min(1, rawTexels / (R * R)),
+      coverage: Math.min(1, paddedTexels / (S * S)),
+      chartCoverage: Math.min(1, rawTexels / (S * S)),
       efficiency: extW * extH > 0 ? exactArea / (extW * extH) : 0,
-      texelsPerUnit: D, resolution: R, extent: { w: extW / R, h: extH / R },
+      texelsPerUnit: D * R / S, resolution: R, extent: { w: extW / S, h: extH / S },
+      fits: fitsR, effectivePadding: opts.paddingTexels * R / S,
       restarts, overlapTexels, mirroredCharts, scaleSearchPacks: packs, method: opts.method
     };
   }

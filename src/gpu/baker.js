@@ -19,21 +19,31 @@
   const VS = `
     attribute vec2 aTarget;
     attribute vec2 aSrc;
+    uniform float flipV; uniform mat3 srcXform;
     attribute vec3 aPos;
     attribute vec3 aNrm;
     attribute vec3 aCol;
     varying vec2 vSrc; varying vec3 vPos; varying vec3 vNrm; varying vec3 vCol;
     void main() {
-      vSrc = aSrc; vPos = aPos; vNrm = aNrm; vCol = aCol;
+      // source uv is v-up; flipY=false textures (glTF) are sampled v-down, then KHR_texture_transform
+      vec2 s = vec2(aSrc.x, flipV > 0.5 ? 1.0 - aSrc.y : aSrc.y);
+      vSrc = (srcXform * vec3(s, 1.0)).xy; vPos = aPos; vNrm = aNrm; vCol = aCol;
       gl_Position = vec4(aTarget * 2.0 - 1.0, 0.0, 1.0);
     }`;
   const FS_TRANSFER = `
     precision highp float;
-    uniform sampler2D map; uniform vec3 color; uniform float hasMap;
+    uniform sampler2D map; uniform vec3 colorLinear; uniform float hasMap; uniform float tint;
     varying vec2 vSrc;
+    // texture bytes are sRGB and copied raw; factors are applied in (approximately) linear space
     void main() {
-      vec4 t = hasMap > 0.5 ? texture2D(map, vSrc) : vec4(color, 1.0);
-      gl_FragColor = vec4(t.rgb, 1.0);
+      vec3 c;
+      if (hasMap > 0.5) {
+        c = texture2D(map, vSrc).rgb;
+        if (tint > 0.5) c = pow(pow(c, vec3(2.2)) * colorLinear, vec3(1.0 / 2.2));
+      } else {
+        c = pow(colorLinear, vec3(1.0 / 2.2));
+      }
+      gl_FragColor = vec4(c, 1.0);
     }`;
   const FS_MAP = `
     precision highp float;
@@ -163,8 +173,15 @@
         map.minFilter = THREE.LinearMipmapLinearFilter; map.magFilter = THREE.LinearFilter;
         map.needsUpdate = true;
       }
+      const col = m.color || [0.8, 0.8, 0.8];
+      const lin = m.colorSpace === 'linear' ? col : col.map(v => Math.pow(Math.max(0, v), 2.2));
+      const srcXform = new THREE.Matrix3();
+      if (m.map && m.map.image) { m.map.updateMatrix(); srcXform.copy(m.map.matrix); }
       return new THREE.ShaderMaterial({ vertexShader: VS, fragmentShader: FS_TRANSFER, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
-        uniforms: { map: { value: map }, hasMap: { value: map ? 1 : 0 }, color: { value: new THREE.Color().fromArray(m.color || [0.8, 0.8, 0.8]) } } });
+        uniforms: {
+          map: { value: map }, hasMap: { value: map ? 1 : 0 }, colorLinear: { value: new THREE.Vector3().fromArray(lin) },
+          tint: { value: lin.some(v => v < 0.999) ? 1 : 0 }, flipV: { value: m.map && m.map.flipY === false ? 1 : 0 }, srcXform: { value: srcXform }
+        } });
     });
     if (opts.faceMaterial && mats.length > 1) {
       let start = 0;
@@ -209,7 +226,7 @@
     }
     const geo = buildGeometry(P, opts.newUV, { aPos: { array: Float32Array.from(P), size: 3 }, aNrm: { array: Float32Array.from(N), size: 3 }, aCol: { array: col, size: 3 } });
     const mat = new THREE.ShaderMaterial({ vertexShader: VS, fragmentShader: FS_MAP, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
-      uniforms: { kind: { value: 0 }, bmin: { value: new THREE.Vector3().fromArray(min) }, bsize: { value: new THREE.Vector3().fromArray(bsize) } } });
+      uniforms: { flipV: { value: 0 }, srcXform: { value: new THREE.Matrix3() }, kind: { value: 0 }, bmin: { value: new THREE.Vector3().fromArray(min) }, bsize: { value: new THREE.Vector3().fromArray(bsize) } } });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false;
     const scene = new THREE.Scene();

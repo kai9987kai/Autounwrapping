@@ -88,10 +88,13 @@
     /* ---------- model ---------- */
     setModel(model) {
       const THREE = root.THREE;
+      if (this.baked) this.baked.dispose();
+      for (const m of (this.model && this.model !== model && this.model.materials) || []) if (m.map && m.map.dispose) m.map.dispose();
       this.model = model;
       this.result = null;
       this.baked = null;
-      if (this.mesh) { this.scene.remove(this.mesh); this.mesh.geometry.dispose(); }
+      if (this.mesh) { this.scene.remove(this.mesh); this.mesh.geometry.dispose(); if (this.mesh.material) this.mesh.material.dispose(); }
+      this.highlightChart(-1);
       const F = model.positions.length / 9;
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(model.positions, 3));
@@ -110,6 +113,7 @@
       this.result = result;
       if (!this.mesh) return;
       const uvAttr = this.mesh.geometry.attributes.uv;
+      if (result && result.uv && result.uv.length !== uvAttr.array.length) { this.result = null; return; } // result of another mesh
       if (result && result.uv && this.textureMode !== 'original') { uvAttr.array.set(result.uv); uvAttr.needsUpdate = true; }
       this.setSeamSegments(result ? result.seamSegments : null);
       this.updateColors();
@@ -166,7 +170,7 @@
         if (this.textureMode === 'checker') map = T.checker(1024, 16);
         else if (this.textureMode === 'colorgrid') map = T.colorGrid(2048);
         else if (this.textureMode === 'baked') map = this.baked;
-        else if (this.textureMode === 'original' && this.model) { const m = this.model.materials.find(x => x.map); map = m ? m.map : null; }
+        else if (this.textureMode === 'original' && this.model) { const m = this.model.materials.find(x => x.map); map = m ? this.originalMap(m.map) : null; }
       }
       const old = this.mesh.material;
       const mat = new THREE.MeshStandardMaterial({
@@ -177,6 +181,21 @@
       this.mesh.material = mat;
       if (old) old.dispose();
       this.requestRender();
+    }
+
+    /* Original textures are shown with the model's (v-up normalised) uvs: glTF maps
+     * (flipY = false) get a v-flip composed with their own texture transform. */
+    originalMap(src) {
+      if (src.flipY !== false) return src;
+      if (this._origMap && this._origMap.src === src) return this._origMap.tex;
+      const tex = src.clone();
+      src.updateMatrix();
+      tex.matrixAutoUpdate = false;
+      tex.matrix.copy(src.matrix).multiply(new root.THREE.Matrix3().set(1, 0, 0, 0, -1, 1, 0, 0, 1));
+      tex.needsUpdate = true;
+      if (this._origMap) this._origMap.tex.dispose();
+      this._origMap = { src, tex };
+      return tex;
     }
 
     setWireframe(on) { this.wire = on; this.updateMaterial(); }

@@ -35,6 +35,8 @@
       this.replay = new Map();   // op -> args (state to restore after a hard cancel)
       this.nextId = 1;
       this.mainCancel = false;
+      this.restarting = false;
+      this.ready = Promise.resolve();   // settles when a restart (after cancel / crash) has replayed state
       this.worker = null;
       this.engine = null;
       for (const op of OPS) if (!this[op]) this[op] = (...args) => this.call(op, ...args);
@@ -111,9 +113,9 @@
     }
 
     pump() {
-      if (this.active || !this.queue.length) return;
+      if (this.active || !this.queue.length || this.restarting) return;
       const job = this.active = this.queue.shift();
-      this.record(job.op, job.args);
+      if (!job.noRecord) this.record(job.op, job.args);
       const done = (fn, v) => {
         if (this.active !== job) return;
         this.active = null;
@@ -170,20 +172,30 @@
       this.hardRestart(err);
     }
 
-    async hardRestart(reason) {
+    /* Terminates the worker, rejects in-flight and queued work, respawns and replays
+     * the engine state (mesh, source UVs, seams). Calls issued while restarting wait
+     * in the queue and run after the replay, so they always see the restored state. */
+    hardRestart(reason) {
       const pending = (this.active ? [this.active] : []).concat(this.queue.filter(j => !j.internal));
       this.active = null;
       this.queue = [];
+      this.restarting = true;
       if (this.worker) { try { this.worker.terminate(); } catch (e) { /* ignore */ } this.worker = null; }
       for (const j of pending) j.reject(reason);
-      try { await this.spawnWorker(); }
-      catch (e) { this.startMain(); }
-      // snapshot first: replaying setMesh goes through record(), which resets the replay map
       const entries = ['setMesh', 'setSourceUV', 'setCut'].filter(op => this.replay.has(op)).map(op => [op, this.replay.get(op)]);
-      for (const [op, args] of entries) {
-        await this.call(op, ...args.map(a => ArrayBuffer.isView(a) ? a.slice() : a)).catch(() => {});
-      }
-      for (const [op, args] of entries) this.replay.set(op, args);
+      this.ready = (async () => {
+        try { await this.spawnWorker(); }
+        catch (e) { this.startMain(); }
+        const userJobs = this.queue.splice(0);
+        const replayed = entries.map(([op, args]) => new Promise((resolve) => {
+          this.queue.push({ id: this.nextId++, op, args: args.map(a => ArrayBuffer.isView(a) ? a.slice() : a), resolve, reject: resolve, internal: true, noRecord: true });
+        }));
+        this.queue.push(...userJobs);
+        this.restarting = false;
+        this.pump();
+        await Promise.all(replayed);
+      })();
+      return this.ready;
     }
 
     async cancel() {

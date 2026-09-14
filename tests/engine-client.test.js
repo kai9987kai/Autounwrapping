@@ -112,3 +112,21 @@ test('main mode: errors propagate and cancel rejects queued work', async () => {
   await assert.rejects(b, (e) => e.name === 'CancelError');
   await a.catch(() => {});
 });
+
+test('calls issued during a restart wait for the replay (seams restored) instead of failing', async () => {
+  const { ctx, workerFactory } = setup();
+  const client = await new ctx.UVApp.EngineClient({ workerFactory }).init();
+  await client.setMesh(F.torusKnot(0.8, 0.3, 40, 8));
+  await client.seamsFromAngle(10);
+  const expected = (await client.getManualCut()).reduce((s, x) => s + x, 0);
+  assert.ok(expected > 0);
+  const inflight = assert.rejects(client.unwrap({}), (e) => e.name === 'CancelError');
+  const cancelling = client.cancel();
+  const during = client.getManualCut();          // issued before the new worker is ready
+  await inflight; await cancelling;
+  assert.equal((await during).reduce((s, x) => s + x, 0), expected);
+  await client.ready;
+  const r = await client.unwrap({ mode: 'box' });
+  assert.ok(r.metrics.faces > 0);
+  client.dispose();
+});

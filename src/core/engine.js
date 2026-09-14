@@ -82,7 +82,7 @@ UVCore.define('engine', function (C) {
     }
 
     meshInfo() {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       return {
         faceCount: m.faceCount, weldCount: m.weldCount, edgeCount: m.edgeCount,
         boundaryEdgeCount: m.boundaryEdgeCount, nonManifoldEdgeCount: m.nonManifoldEdgeCount,
@@ -92,13 +92,13 @@ UVCore.define('engine', function (C) {
       };
     }
 
-    requireMesh() {
+    _requireMesh() {
       if (!this.mesh) throw new Error('No mesh loaded (call setMesh first).');
       return this.mesh;
     }
 
     setCut(cut) {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       this.manualCut = new Uint8Array(m.edgeCount);
       if (cut && typeof cut !== 'function') {
         if (cut.length !== m.edgeCount) throw new Error('setCut: expected ' + m.edgeCount + ' edge flags, got ' + cut.length);
@@ -106,12 +106,12 @@ UVCore.define('engine', function (C) {
       }
       return this.countSeams();
     }
-    getCut() { this.requireMesh(); return Uint8Array.from(this.lastCut); }
-    getManualCut() { this.requireMesh(); return Uint8Array.from(this.manualCut); }
+    getCut() { this._requireMesh(); return Uint8Array.from(this.lastCut); }
+    getManualCut() { this._requireMesh(); return Uint8Array.from(this.manualCut); }
     countSeams() { let n = 0; for (let e = 0; e < this.manualCut.length; e++) n += this.manualCut[e]; return n; }
 
     toggleSeamEdge(face, k, value) {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       if (!(face >= 0 && face < m.faceCount) || !(k >= 0 && k < 3)) return { edge: -1, value: 0 };
       const e = m.faceEdges[3 * face + k];
       if (e < 0) return { edge: -1, value: 0 };
@@ -120,14 +120,14 @@ UVCore.define('engine', function (C) {
     }
 
     setSeamEdges(edges, value) {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       let changed = 0;
       for (const e of edges) if (e >= 0 && e < m.edgeCount && this.manualCut[e] !== (value ? 1 : 0)) { this.manualCut[e] = value ? 1 : 0; changed++; }
       return changed;
     }
 
     seamsFromAngle(deg) {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       const cosT = Math.cos((typeof deg === 'number' ? deg : 60) * Math.PI / 180);
       let n = 0;
       for (let e = 0; e < m.edgeCount; e++) {
@@ -136,10 +136,10 @@ UVCore.define('engine', function (C) {
       return n;
     }
 
-    clearSeams() { this.requireMesh(); this.manualCut.fill(0); return 0; }
+    clearSeams() { this._requireMesh(); this.manualCut.fill(0); return 0; }
 
     edgeSegments(which) {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       const w = typeof which === 'string' ? which : 'manual';
       if (w === 'all') return C.edgeSegments(m, this.lastCut);
       if (w === 'seams' && this.state) return C.edgeSegments(m, this.state.seamFlags);
@@ -148,7 +148,7 @@ UVCore.define('engine', function (C) {
 
     /* ---------------- imported UVs ---------------- */
     setSourceUV(uv) {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       if (!uv || typeof uv === 'function') { this.sourceUV = null; return null; }
       if (uv.length !== 6 * m.faceCount) throw new Error('setSourceUV: expected ' + (6 * m.faceCount) + ' values, got ' + uv.length);
       this.sourceUV = Float32Array.from(uv);
@@ -157,7 +157,7 @@ UVCore.define('engine', function (C) {
 
     analyzeSource(...args) {
       const { opts } = cb(args);
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       if (!this.sourceUV) throw new Error('The model has no imported UVs to analyse.');
       const o = merge(DEFAULTS, opts);
       return C.computeMetrics(m, this.sourceUV, null, null, { preset: o.preset, resolution: o.packing.resolution, paddingTexels: o.packing.paddingTexels, rasterRes: Math.min(1024, o.packing.resolution) });
@@ -165,7 +165,7 @@ UVCore.define('engine', function (C) {
 
     /* Imported UV discontinuities become manual seams (artist seams are kept). */
     seamsFromSourceUV() {
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       if (!this.sourceUV) throw new Error('The model has no imported UVs.');
       const isl = C.islandsFromUV(m, this.sourceUV);
       const probe = C.computeMetrics(m, this.sourceUV, isl.faceChart, null, { rasterRes: 16 });
@@ -185,7 +185,7 @@ UVCore.define('engine', function (C) {
     /* ---------------- pipeline ---------------- */
     unwrap(...args) {
       const { opts, progress, shouldCancel } = cb(args);
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       const o = merge(DEFAULTS, opts);
       const t0 = now(), timings = { segment: 0, topology: 0, flatten: 0, optimize: 0, pack: 0, metrics: 0, total: 0 };
       const notes = [];
@@ -198,7 +198,7 @@ UVCore.define('engine', function (C) {
         notes.push('Single-chart ' + o.mode + ' projection: relax and repack need an atlas / box / whole unwrap.');
         this.lastCut = cut;
         this.state = { opts: o, charts: [], uv: proj.uv, faceChart: proj.faceChart, cut, packing: null, notes, timings, projection: true };
-        return this.finish(timings, t0, progress);
+        return this._finish(timings, t0, progress);
       }
 
       // ---- seams weights (visibility-aware)
@@ -289,13 +289,14 @@ UVCore.define('engine', function (C) {
       if (fallbacks) notes.push(fallbacks + ' chart(s) used a fallback flattening method.');
       if (remainingFlips) notes.push(remainingFlips + ' flipped triangle(s) remain (non-disk charts fell back to projection).');
 
+      if (cancelled()) return { cancelled: true };
       this.lastCut = cut;
       this.state = { opts: o, charts, uv: null, faceChart: null, cut, packing: null, notes, timings };
-      this.packState(o, progress);
-      return this.finish(timings, t0, progress);
+      this._packState(o, progress);
+      return this._finish(timings, t0, progress);
     }
 
-    packState(o, progress) {
+    _packState(o, progress) {
       const m = this.mesh, st = this.state;
       const t = now();
       const res = C.packCharts(st.charts.map(c => ({ local: c.local, area3D: c.local.area3D })), o.packing, progress);
@@ -316,10 +317,12 @@ UVCore.define('engine', function (C) {
       st.uv = uv; st.faceChart = faceChart;
       st.packing = { method: o.packing.method, coverage: res.coverage, chartCoverage: res.chartCoverage, efficiency: res.efficiency, texelsPerUnit: res.texelsPerUnit, resolution: res.resolution, extent: res.extent, overlapTexels: res.overlapTexels, mirroredCharts: res.mirroredCharts, restarts: res.restarts };
       if (res.mirroredCharts.length) st.notes.push(res.mirroredCharts.length + ' mirrored chart(s) packed as-is.');
+      st.packing.fits = res.fits !== false;
+      if (res.fits === false) st.notes.push('Charts did not fit at ' + res.resolution + 'px with ' + o.packing.paddingTexels + ' texel padding: padding was reduced to about ' + res.effectivePadding.toFixed(1) + ' texels. Raise the texture size, lower the padding or use fewer charts.');
       st.timings.pack = now() - t;
     }
 
-    finish(timings, t0, progress) {
+    _finish(timings, t0, progress) {
       const m = this.mesh, st = this.state, o = st.opts;
       const t = now();
       if (progress) progress('metrics', 0, 1);
@@ -328,7 +331,17 @@ UVCore.define('engine', function (C) {
         rasterRes: Math.min(1024, o.packing.resolution),
         edgeVis: this.visCache && o.seams && o.seams.visibility ? this.visCache.vis.edgeVis : undefined
       });
-      // seam flags for overlays
+      this._computeSeamFlags(st);
+      timings.metrics = now() - t;
+      timings.total = now() - t0;
+      if (progress) progress('metrics', 1, 1);
+      st.metricsScore = metrics.score.score;
+      return this._result(metrics);
+    }
+
+    /* Seam flags (cut edges and chart borders) used by edgeSegments('seams'). */
+    _computeSeamFlags(st) {
+      const m = this.mesh;
       st.seamFlags = new Uint8Array(m.edgeCount);
       for (let e = 0; e < m.edgeCount; e++) {
         const s = m.edgeFaceStart[e], n = m.edgeFaceStart[e + 1] - s;
@@ -337,14 +350,9 @@ UVCore.define('engine', function (C) {
         const f0 = m.edgeFaceList[s];
         for (let i = 1; i < n; i++) if (st.faceChart[m.edgeFaceList[s + i]] !== st.faceChart[f0]) { st.seamFlags[e] = 1; break; }
       }
-      timings.metrics = now() - t;
-      timings.total = now() - t0;
-      if (progress) progress('metrics', 1, 1);
-      st.metricsScore = metrics.score.score;
-      return this.result(metrics);
     }
 
-    result(metrics) {
+    _result(metrics) {
       const st = this.state;
       return {
         uv: Float32Array.from(st.uv), faceChart: Int32Array.from(st.faceChart),
@@ -362,20 +370,23 @@ UVCore.define('engine', function (C) {
       };
     }
 
-    requireCharts(what) {
+    _requireCharts(what) {
       if (!this.state || !this.state.charts.length) throw new Error(what + ' needs an atlas, box or whole unwrap first.');
       return this.state;
     }
 
     relax(...args) {
       const { opts, progress, shouldCancel } = cb(args);
-      const st = this.requireCharts('Relax');
+      const st = this._requireCharts('Relax');
       const o = merge(st.opts, opts);
       const t0 = now();
       const iterations = opts && opts.iterations !== undefined ? opts.iterations : Math.max(20, o.iterations);
       let s = now();
+      // charts are relaxed in place: keep a copy so a cancel leaves the layout untouched
+      const saved = st.charts.map(c => ({ uv: Float64Array.from(c.local.uv), opt: c.opt, flips: c.flips }));
+      const cancelled = () => !!(shouldCancel && shouldCancel());
       for (let i = 0; i < st.charts.length; i++) {
-        if (shouldCancel && shouldCancel()) break;
+        if (cancelled()) break;
         const c = st.charts[i];
         if (C.countFlips(c.local) > 0) C.initChart(c.local, 'tutte');
         const r = C.optimizeChart(c.local, { energy: o.optimizer === 'arap' ? 'arap' : 'sd', iterations, anderson: o.anderson, shouldCancel });
@@ -383,34 +394,38 @@ UVCore.define('engine', function (C) {
         c.flips = C.countFlips(c.local);
         if (progress) progress('optimize', i + 1, st.charts.length);
       }
+      if (cancelled()) {
+        st.charts.forEach((c, i) => { c.local.uv.set(saved[i].uv); c.opt = saved[i].opt; c.flips = saved[i].flips; });
+        return { cancelled: true };
+      }
       st.timings = { segment: 0, topology: 0, flatten: 0, optimize: now() - s, pack: 0, metrics: 0, total: 0 };
       st.opts = o;
       st.notes = ['Relaxed ' + st.charts.length + ' chart(s) with ' + (o.optimizer === 'arap' ? 'ARAP' : 'SLIM') + ' (' + iterations + ' iterations).'];
-      this.packState(o, progress);
-      return this.finish(st.timings, t0, progress);
+      this._packState(o, progress);
+      return this._finish(st.timings, t0, progress);
     }
 
     repack(...args) {
       const { opts, progress } = cb(args);
-      const st = this.requireCharts('Repack');
+      const st = this._requireCharts('Repack');
       const o = merge(st.opts, opts);
       const t0 = now();
       st.opts = o;
       st.timings = { segment: 0, topology: 0, flatten: 0, optimize: 0, pack: 0, metrics: 0, total: 0 };
       st.notes = ['Repacked ' + st.charts.length + ' chart(s) (' + o.packing.method + ', ' + o.packing.resolution + 'px, padding ' + o.packing.paddingTexels + ').'];
-      this.packState(o, progress);
-      return this.finish(st.timings, t0, progress);
+      this._packState(o, progress);
+      return this._finish(st.timings, t0, progress);
     }
 
     optimizeSearch(...args) {
       const { opts, progress, shouldCancel } = cb(args);
-      const m = this.requireMesh();
+      const m = this._requireMesh();
       const o = merge(DEFAULTS, opts);
       const a = o.segmentation.angleDeg;
       let angles = Array.from(new Set([a - 15, a, a + 15].map(v => Math.max(20, Math.min(88, v)))));
       if (m.faceCount > 30000) angles = angles.slice(0, 2);
       const trials = [];
-      let best = null, bestSnap = null;
+      let best = null, bestSnap = null, bestIdx = -1;
       for (let i = 0; i < angles.length; i++) {
         if (shouldCancel && shouldCancel()) break;
         const trialOpts = merge(o, { segmentation: { angleDeg: angles[i] } });
@@ -418,11 +433,11 @@ UVCore.define('engine', function (C) {
         if (r.cancelled) break;
         const summary = { chartCount: r.metrics.chartCount, score: r.metrics.score.score, sdMean: r.metrics.sdMean, seamNorm: r.metrics.seamNorm, textureEff: r.metrics.efficiency.textureEff, valid: r.metrics.score.valid };
         trials.push({ params: { angleDeg: angles[i] }, metrics: summary, score: r.metrics.score.score });
-        if (!best || C.compareMetrics(r.metrics, best.metrics) < 0) { best = r; bestSnap = this.snapshot(); }
+        if (!best || C.compareMetrics(r.metrics, best.metrics) < 0) { best = r; bestSnap = this.snapshot(); bestIdx = trials.length - 1; }
       }
       if (!best) return { cancelled: true };
-      this.restoreState(bestSnap);
-      best.notes = best.notes.concat(['Search tried segmentation angles ' + angles.join('°, ') + '° and kept ' + trials[trials.findIndex(tr => tr.score === best.metrics.score.score)].params.angleDeg + '°.']);
+      this._restoreState(bestSnap);
+      best.notes = best.notes.concat(['Search tried segmentation angles ' + angles.slice(0, trials.length).join('°, ') + '° and kept ' + trials[bestIdx].params.angleDeg + '°.']);
       return { best, trials };
     }
 
@@ -434,10 +449,21 @@ UVCore.define('engine', function (C) {
     }
 
     /* ---------------- undo ---------------- */
+    /* Cheap fingerprint of the welded topology: snapshots only restore onto the same mesh. */
+    _meshKey() {
+      const m = this.mesh;
+      let h = 0x811c9dc5;
+      const cw = m.cornerWeld;
+      for (let i = 0; i < cw.length; i++) { h ^= cw[i]; h = Math.imul(h, 0x01000193); }
+      return m.faceCount + ':' + m.edgeCount + ':' + m.weldCount + ':' + (h >>> 0).toString(16);
+    }
+
     snapshot() {
-      if (!this.state) return { empty: true, manualCut: this.manualCut ? Uint8Array.from(this.manualCut) : null };
+      if (!this.mesh) return { empty: true, meshKey: null, manualCut: null };
+      if (!this.state) return { empty: true, meshKey: this._meshKey(), manualCut: this.manualCut ? Uint8Array.from(this.manualCut) : null };
       const st = this.state;
       return {
+        meshKey: this._meshKey(),
         opts: JSON.parse(JSON.stringify(st.opts)),
         uv: Float32Array.from(st.uv), faceChart: Int32Array.from(st.faceChart),
         cut: Uint8Array.from(st.cut), manualCut: Uint8Array.from(this.manualCut),
@@ -448,17 +474,27 @@ UVCore.define('engine', function (C) {
       };
     }
 
-    restoreState(snap) {
-      const m = this.requireMesh();
-      if (!snap || snap.empty) { this.state = null; if (snap && snap.manualCut) this.manualCut = Uint8Array.from(snap.manualCut); return; }
-      if (snap.uv.length !== 6 * m.faceCount) throw new Error('Snapshot belongs to a different mesh.');
-      this.manualCut = Uint8Array.from(snap.manualCut);
+    _restoreState(snap) {
+      const m = this._requireMesh();
+      const wrong = () => new Error('This snapshot belongs to a different mesh and cannot be restored.');
+      // validate everything before touching engine state
+      if (snap && snap.meshKey && snap.meshKey !== this._meshKey()) throw wrong();
+      if (!snap || snap.empty) {
+        if (snap && snap.manualCut && snap.manualCut.length !== m.edgeCount) throw wrong();
+        this.state = null;
+        if (snap && snap.manualCut) this.manualCut = Uint8Array.from(snap.manualCut);
+        return;
+      }
+      if (snap.uv.length !== 6 * m.faceCount || snap.faceChart.length !== m.faceCount || snap.cut.length !== m.edgeCount || snap.manualCut.length !== m.edgeCount) throw wrong();
       const cut = Uint8Array.from(snap.cut);
       const charts = snap.chartFaces.map((faces, i) => {
+        for (const f of faces) if (!(f >= 0 && f < m.faceCount)) throw wrong();
         const local = C.buildChartLocal(m, faces, cut);
+        if (!snap.chartUV[i] || snap.chartUV[i].length !== local.uv.length) throw wrong();
         local.uv.set(snap.chartUV[i]);
         return { faces: local.faces, local, init: { method: 'restored', fallbacks: [] }, opt: null, flips: C.countFlips(local) };
       });
+      this.manualCut = Uint8Array.from(snap.manualCut);
       this.lastCut = cut;
       this.state = { opts: snap.opts, charts, uv: Float32Array.from(snap.uv), faceChart: Int32Array.from(snap.faceChart), cut, packing: snap.packing, notes: snap.notes.slice(), timings: { segment: 0, topology: 0, flatten: 0, optimize: 0, pack: 0, metrics: 0, total: 0 }, projection: snap.projection };
       if (charts.length) {
@@ -472,14 +508,15 @@ UVCore.define('engine', function (C) {
           charts[ci].rect = isFinite(mnx) ? { x: mnx, y: mny, w: mxx - mnx, h: mxy - mny } : null;
         }
       }
+      this._computeSeamFlags(this.state);
     }
 
     restore(snap, ...rest) {
       const { progress } = cb(rest.length ? [undefined, ...rest] : []);
-      this.restoreState(snap);
+      this._restoreState(snap);
       if (!this.state) return null;
       const t0 = now();
-      return this.finish(this.state.timings, t0, progress);
+      return this._finish(this.state.timings, t0, progress);
     }
   }
 

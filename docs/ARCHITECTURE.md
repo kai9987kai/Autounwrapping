@@ -37,6 +37,19 @@ into `src/ui/{viewport,uv-view,panels,help,textures,main}.js` instead of the
   `analyzeSource`, `seamsFromSourceUV`, `meshInfo`, `defaults`, `capabilities`. Results own
   their buffers so the worker can transfer them. Mode `'whole'` (pelt) is supported.
 
+* **Hardening after the v4 bug review**: snapshots carry a mesh fingerprint (`meshKey`) and
+  `restore` rejects snapshots of another mesh before mutating anything; `relax` and `unwrap`
+  return `{ cancelled: true }` without half-applied state; engine internals are `_`-prefixed so
+  the worker never exposes (or transfers) engine-owned buffers; the ineffective `__cancelSoft`
+  op was removed (cancel = terminate + respawn + replay, and calls made during the restart wait
+  for the replay — `EngineClient.ready`). Packing results report `fits` / `effectivePadding`; a
+  padding-dominated layout is scaled down as a whole instead of clamping charts onto each other.
+* **UV conventions**: every loader output is v-up (glTF `TEXCOORD_0` is flipped on import,
+  normalized / quantized attributes are denormalized); materials record `colorSpace`
+  (`'linear'` glTF factors, `'srgb'` MTL Kd). The baker samples `flipY = false` maps v-down and
+  applies each map's `KHR_texture_transform` matrix; GLB export writes spec-correct v-down UVs
+  with an unflipped image, so layouts open un-mirrored in other tools.
+
 The rest of this document is the original contract.
 
 This document is the **contract between modules**. Engineers implementing a

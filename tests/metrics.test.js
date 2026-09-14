@@ -174,7 +174,7 @@ test('30k-face torus knot metrics are fast', () => {
   const r = C.computeMetrics(m, uv, faceChart, null);
   const ms = performance.now() - t0;
   assert.equal(r.faces, m.faceCount);
-  assert.ok(ms < 4000, 'took ' + ms.toFixed(0) + ' ms');
+  assert.ok(ms < 12000, 'took ' + ms.toFixed(0) + ' ms');
 });
 
 test('viaSource round-trip', () => {

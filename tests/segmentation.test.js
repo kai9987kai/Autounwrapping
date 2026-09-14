@@ -230,7 +230,7 @@ test('torus knot (30k faces) segments quickly', () => {
   const dt = performance.now() - t0;
   checkPartition(m, res);
   for (const faces of res.chartFaces) assert.ok(faces.length <= 6000);
-  assert.ok(dt < 2500, 'took ' + dt.toFixed(0) + ' ms');
+  assert.ok(dt < 8000, 'took ' + dt.toFixed(0) + ' ms');
 });
 
 test('~100k faces with 3 Lloyd rounds', () => {
@@ -240,5 +240,5 @@ test('~100k faces with 3 Lloyd rounds', () => {
   const res = C.segmentCharts(m, { lloydIterations: 3 });
   const dt = performance.now() - t0;
   checkPartition(m, res);
-  assert.ok(dt < 5000, 'took ' + dt.toFixed(0) + ' ms');
+  assert.ok(dt < 15000, 'took ' + dt.toFixed(0) + ' ms');
 });

@@ -74,14 +74,15 @@
       if (!THREE || !THREE.GLTFExporter) { reject(new Error('GLTFExporter is not loaded.')); return; }
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(positions), 3));
-      if (uv) geo.setAttribute('uv', new THREE.BufferAttribute(Float32Array.from(uv), 2));
+      // glTF TEXCOORD_0 is v-down: store (u, 1 - v) so layouts open un-mirrored in Blender & co.
+      if (uv) { const t = Float32Array.from(uv); for (let i = 1; i < t.length; i += 2) t[i] = 1 - t[i]; geo.setAttribute('uv', new THREE.BufferAttribute(t, 2)); }
       if (opts.normals) geo.setAttribute('normal', new THREE.BufferAttribute(Float32Array.from(opts.normals), 3));
       else geo.computeVertexNormals();
       const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8, metalness: 0 });
       if (opts.texture) {
         const tex = opts.texture.isTexture ? opts.texture : new THREE.CanvasTexture(opts.texture);
-        // canvas top row = v 1: keep flipY so GLTFExporter flips the image into glTF's v-down convention
-        if (!opts.texture.isTexture) tex.flipY = true;
+        // canvas top row = v 1 = glTF v 0 after the uv conversion above: write the image as-is
+        if (!opts.texture.isTexture) tex.flipY = false;
         if ('encoding' in tex) tex.encoding = THREE.sRGBEncoding;
         mat.map = tex;
       }
