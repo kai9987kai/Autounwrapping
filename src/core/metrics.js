@@ -54,8 +54,8 @@ UVCore.define('metrics', function (C) {
   }
   /* 1 at 0, 0.9 at p10, 0.5 at the median, -> 0 beyond (Lighthouse log-normal). */
   function logNormalScore(value, p10, median) {
-    if (!(value > 0)) return 1;
     if (!isFinite(value)) return 0;
+    if (!(value > 0)) return 1;
     const std = Math.log(value / median) * 0.9061938024368232 / (-Math.log(p10 / median));
     let s = erfc(std) / 2;
     if (value <= p10) s = Math.max(0.9, Math.min(1, s));
@@ -65,9 +65,10 @@ UVCore.define('metrics', function (C) {
   }
 
   function mipSafePadding(resolution, paddingTexels) {
-    const p = Math.max(0, paddingTexels || 0);
+    const known = Number.isFinite(paddingTexels) && paddingTexels >= 0;
+    const p = known ? paddingTexels : 0;
     const maxSafeMip = p >= 1 ? Math.floor(Math.log2(p) + 1e-9) : -1;
-    return { maxSafeMip, paddingTexels: p, resolution, minTexelsAtMaxMip: p >= 1 ? p / Math.pow(2, maxSafeMip) : 0 };
+    return { maxSafeMip, paddingKnown: known, paddingTexels: known ? p : null, resolution, minTexelsAtMaxMip: p >= 1 ? p / Math.pow(2, maxSafeMip) : 0 };
   }
 
   function weightToRgb(w) {
@@ -154,6 +155,9 @@ UVCore.define('metrics', function (C) {
     const presetName = PRESETS[opts.preset] ? opts.preset : (PRESETS[opts.thresholds] ? opts.thresholds : 'game_hero');
     const resolution = opts.resolution || 1024;
     const F = mesh.faceCount, P = mesh.positions;
+    if (!uv || uv.length !== F * 6) throw new Error('UV coordinates must contain exactly six values per face.');
+    if (faceChart && faceChart.length !== F) throw new Error('Chart labels must contain one value per face.');
+    if (faceChart) for (const id of faceChart) if (!Number.isInteger(id) || id < -1 || id >= F) throw new Error('Chart labels must be integers from -1 to faceCount - 1.');
     let chartCount;
     if (!faceChart) { const isl = islandsFromUV(mesh, uv); faceChart = isl.faceChart; chartCount = isl.chartCount; }
     else { chartCount = 0; for (let f = 0; f < F; f++) if (faceChart[f] + 1 > chartCount) chartCount = faceChart[f] + 1; }
@@ -163,8 +167,9 @@ UVCore.define('metrics', function (C) {
     const s1a = new Float64Array(F), s2a = new Float64Array(F), aUV = new Float64Array(F);
     // per chart accumulators
     const cA3 = new Float64Array(chartCount), cAuv = new Float64Array(chartCount), cQ = new Float64Array(chartCount), cP = new Float64Array(chartCount);
-    const cQsd = new Float64Array(chartCount), cFaces = new Int32Array(chartCount), cFlips = new Int32Array(chartCount);
+    const cQsd = new Float64Array(chartCount), cFaces = new Int32Array(chartCount), cFlips = new Int32Array(chartCount), cInvalid = new Int32Array(chartCount);
     let sumA3 = 0, sumAuv = 0, flipped = 0, degenerate = 0, flippedArea = 0, outOfRange = 0;
+    let nonFinite = 0, geometryDegenerate = 0, uvDegenerate = 0, unassignedFaces = 0;
     let maxA3 = 0;
     for (let f = 0; f < F; f++) if (mesh.faceAreas[f] > maxA3) maxA3 = mesh.faceAreas[f];
     const a3Eps = 1e-12 * Math.max(maxA3, 1e-30);
@@ -173,19 +178,34 @@ UVCore.define('metrics', function (C) {
     for (let f = 0; f < F; f++) {
       const p = 9 * f, u = 6 * f, ch = faceChart[f];
       if (ch >= 0) cFaces[ch]++;
+      else unassignedFaces++;
+      let finite = true;
+      for (let k = 0; k < 6; k++) if (!Number.isFinite(uv[u + k])) finite = false;
+      for (let k = 0; k < 9; k++) if (!Number.isFinite(P[p + k])) finite = false;
+      if (!finite || !Number.isFinite(mesh.faceAreas[f])) {
+        nonFinite++; degenerate++; outOfRange++; faceFlag[f] = 2;
+        if (ch >= 0) cInvalid[ch]++;
+        continue;
+      }
       for (let k = 0; k < 6; k++) { const v = uv[u + k]; if (!(v >= -UV_EPS && v <= 1 + UV_EPS)) { outOfRange++; break; } }
       const A3 = mesh.faceAreas[f];
       const Auv = 0.5 * ((uv[u + 2] - uv[u]) * (uv[u + 5] - uv[u + 1]) - (uv[u + 4] - uv[u]) * (uv[u + 3] - uv[u + 1]));
+      if (!Number.isFinite(Auv)) { nonFinite++; degenerate++; faceFlag[f] = 2; if (ch >= 0) cInvalid[ch]++; continue; }
       aUV[f] = Auv;
       sumA3 += A3; sumAuv += Math.abs(Auv);
       if (ch >= 0) { cA3[ch] += A3; cAuv[ch] += Math.abs(Auv); }
       const e1x = P[p + 3] - P[p], e1y = P[p + 4] - P[p + 1], e1z = P[p + 5] - P[p + 2];
       const e2x = P[p + 6] - P[p], e2y = P[p + 7] - P[p + 1], e2z = P[p + 8] - P[p + 2];
       const l1 = Math.sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
-      if (!(A3 > a3Eps) || !(l1 > 0) || !(Math.abs(Auv) > 1e-18)) { faceFlag[f] = 2; degenerate++; continue; }
+      if (!(A3 > a3Eps) || !(l1 > 0) || !(Math.abs(Auv) > 1e-18)) {
+        faceFlag[f] = 2; degenerate++;
+        if (!(A3 > a3Eps) || !(l1 > 0)) geometryDegenerate++; else uvDegenerate++;
+        if (ch >= 0) cInvalid[ch]++;
+        continue;
+      }
       const x2 = (e1x * e2x + e1y * e2y + e1z * e2z) / l1;
       const y2 = Math.sqrt(Math.max(0, e2x * e2x + e2y * e2y + e2z * e2z - x2 * x2));
-      if (!(y2 > 0)) { faceFlag[f] = 2; degenerate++; continue; }
+      if (!(y2 > 0)) { faceFlag[f] = 2; degenerate++; geometryDegenerate++; if (ch >= 0) cInvalid[ch]++; continue; }
       const du1 = uv[u + 2] - uv[u], dv1 = uv[u + 3] - uv[u + 1], du2 = uv[u + 4] - uv[u], dv2 = uv[u + 5] - uv[u + 1];
       const a = du1 / l1, b = (du2 - a * x2) / y2, c = dv1 / l1, d = (dv2 - c * x2) / y2;
       const s = C.svd2(a, b, c, d);
@@ -271,7 +291,27 @@ UVCore.define('metrics', function (C) {
       dVar += cA3[c] * (r - 1) * (r - 1);
       if (r < dMin) dMin = r; if (r > dMax) dMax = r;
     }
-    const tdStd = sumA3 > 0 ? Math.sqrt(dVar / sumA3) : 0;
+    const chartCV = sumA3 > 0 ? Math.sqrt(dVar / sumA3) : 0;
+    // Area-weighted local density detects distortion inside a single island;
+    // comparing only chart averages can call a strongly stretched island even.
+    let localDensityArea = 0, localDensityNum = 0;
+    const faceDensity = new Float64Array(F);
+    for (let f = 0; f < F; f++) {
+      const A = mesh.faceAreas[f];
+      if (!(A > a3Eps) || !Number.isFinite(A) || !Number.isFinite(aUV[f])) continue;
+      faceDensity[f] = Math.sqrt(Math.abs(aUV[f]) / A);
+      localDensityNum += faceDensity[f] * A; localDensityArea += A;
+    }
+    const localDensityMean = localDensityArea > 0 ? localDensityNum / localDensityArea : 0;
+    let localDensityVar = 0, localMin = Infinity, localMax = 0;
+    for (let f = 0; f < F; f++) {
+      const A = mesh.faceAreas[f];
+      if (!(A > a3Eps) || !Number.isFinite(A) || !Number.isFinite(aUV[f])) continue;
+      const ratio = localDensityMean > 0 ? faceDensity[f] / localDensityMean : 0;
+      localDensityVar += A * (ratio - 1) * (ratio - 1);
+      localMin = Math.min(localMin, ratio); localMax = Math.max(localMax, ratio);
+    }
+    const tdStd = localDensityArea > 0 ? Math.sqrt(localDensityVar / localDensityArea) : 0;
     let sdOptNum = 0, sdOptA = 0;
     for (let c = 0; c < chartCount; c++) {
       if (!(cP[c] > 0) || !(cQsd[c] > 0)) continue;
@@ -335,10 +375,11 @@ UVCore.define('metrics', function (C) {
         flips: cFlips[c], density: densMean > 0 ? density[c] / densMean : 0,
         pxPerUnit: density[c] * resolution,
         seamShare: seamLength3D > 0 ? chartSeam[c] / seamLength3D : 0,
-        valid: cFlips[c] === 0 && !bij.badCharts.has(c)
+        valid: cFlips[c] === 0 && cInvalid[c] === 0 && !bij.badCharts.has(c)
       });
     }
-    const pad = mipSafePadding(resolution, opts.paddingTexels !== undefined ? opts.paddingTexels : 0);
+    const effectivePadding = opts.effectivePaddingTexels !== undefined ? opts.effectivePaddingTexels : opts.paddingTexels;
+    const pad = mipSafePadding(resolution, effectivePadding);
 
     const metrics = {
       faces: F, corners: 3 * F, chartCount,
@@ -347,18 +388,19 @@ UVCore.define('metrics', function (C) {
       sdChartOpt: sdOptA > 0 ? sdOptNum / sdOptA : sdMean,
       angleMeanDeg: okArea > 0 ? angNum / okArea : 0, angleMaxDeg: angMax, angleP95Deg: angleP95,
       areaLog2Mean: okArea > 0 ? areaNum / okArea : 0, areaLog2Max: areaMax,
-      flipped, flippedAreaFraction: sumA3 > 0 ? flippedArea / sumA3 : 0, degenerate, outOfRange,
+      flipped, flippedAreaFraction: sumA3 > 0 ? flippedArea / sumA3 : 0, degenerate, geometryDegenerate, uvDegenerate, nonFinite, unassignedFaces, outOfRange,
       seamLength3D, seamNorm, seamEdgeCount, seamSegments, boundaryLength3D, visibleSeamLength,
       coverageExact: sumAuv, coverageRaster: raster.coverage, overlapTexels: raster.overlapTexels,
-      bijectivity: { selfIntersectingCharts: bij.self, overlappingPairs: bij.pairs, containedCharts: bij.contained, valid: bij.valid },
-      texelDensity: { mean: densMean, std: tdStd, min: isFinite(dMin) ? dMin : 0, max: dMax, cv: tdStd, pxPerUnit: densMean * resolution, resolution },
+      bijectivity: { selfIntersectingCharts: bij.self, overlappingPairs: bij.pairs, containedCharts: bij.contained, complete: bij.complete, valid: bij.valid && degenerate === 0 && unassignedFaces === 0 && raster.overlapTexels === 0 },
+      texelDensity: { mean: localDensityMean, std: tdStd, min: isFinite(localMin) ? localMin : 0, max: localMax, cv: tdStd, chartCV, chartMean: densMean, pxPerUnit: localDensityMean * resolution, resolution },
       efficiency: { stretchEff, packingEff, textureEff, equivalentResolution: resolution * Math.sqrt(textureEff), l2Opt: Math.sqrt(L2opt2), densityPolicyEff: L2eq2 > 0 ? Math.min(1, L2opt2 / L2eq2) : 1 },
-      bake: { maxSafeMip: pad.maxSafeMip, outOfRange, overlapTexels: raster.overlapTexels, flipped, tdCV: tdStd, subTexelCharts },
+      bake: { maxSafeMip: pad.maxSafeMip, paddingKnown: pad.paddingKnown, paddingTexels: pad.paddingTexels, requestedPaddingTexels: opts.requestedPaddingTexels === undefined ? (opts.paddingTexels === undefined ? null : opts.paddingTexels) : opts.requestedPaddingTexels, paddingSource: pad.paddingKnown ? (opts.paddingSource || 'provided') : 'unknown', outOfRange, overlapTexels: raster.overlapTexels, flipped, degenerate, tdCV: tdStd, subTexelCharts },
       faceFlag, faceL2, faceSD, faceAreaLog2, cornerAngleErr,
       histogram: { bins: hist, edges, p50: sdP50, p90: sdP90, p99: sdP99 },
       perChart, preset: presetName
     };
     metrics.score = qualityScore(metrics, { preset: presetName, paddingTexels: opts.paddingTexels });
+    metrics.bake.ready = metrics.score.valid && pad.paddingKnown && pad.maxSafeMip >= PRESETS[presetName].targetMip && subTexelCharts === 0 && tdStd <= 0.25;
     metrics.grades = metrics.score.grades;
     return metrics;
   }
@@ -366,6 +408,7 @@ UVCore.define('metrics', function (C) {
   /* Exact overlap / self-intersection tests on UV boundary segments. */
   function bijectivity(mesh, uv, faceChart, chartCount, faceFlag, flipped) {
     const F = mesh.faceCount;
+    const components = new C.UnionFind(F);
     // boundary half-edges in UV: (face f, corner k) with no UV-continuous same-chart twin
     const segs = [];
     for (let f = 0; f < F; f++) {
@@ -378,23 +421,38 @@ UVCore.define('metrics', function (C) {
         for (let p = mesh.edgeFaceStart[e]; p < mesh.edgeFaceStart[e + 1] && !twin; p++) {
           const g = mesh.edgeFaceList[p];
           if (g === f || faceChart[g] !== faceChart[f] || faceFlag[g] === 2) continue;
-          if (continuousAcross(mesh, uv, f, g, a, b)) twin = true;
+          const ga = cornerOfWeld(mesh, g, a), gb = cornerOfWeld(mesh, g, b);
+          // A genuine twin traverses the common edge in the opposite direction.
+          // Duplicate faces with the same winding must retain their boundaries.
+          if (ga >= 0 && gb >= 0 && (gb + 1) % 3 === ga && continuousAcross(mesh, uv, f, g, a, b)) {
+            twin = true; components.union(f, g);
+          }
         }
         if (!twin) segs.push(f, k);
       }
     }
+    const componentOf = new Int32Array(F), componentCharts = [], rootIds = new Map();
+    for (let f = 0; f < F; f++) {
+      const root = components.find(f);
+      if (!rootIds.has(root)) { rootIds.set(root, componentCharts.length); componentCharts.push(faceChart[f]); }
+      componentOf[f] = rootIds.get(root);
+    }
+    const componentCount = componentCharts.length;
     const nS = segs.length / 2;
     const sx0 = new Float64Array(nS), sy0 = new Float64Array(nS), sx1 = new Float64Array(nS), sy1 = new Float64Array(nS), sc = new Int32Array(nS);
+    const segmentComponent = new Int32Array(nS);
     const lens = new Float64Array(nS);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (let i = 0; i < nS; i++) {
       const f = segs[2 * i], k = segs[2 * i + 1], c0 = 3 * f + k, c1 = 3 * f + (k + 1) % 3;
       sx0[i] = uv[2 * c0]; sy0[i] = uv[2 * c0 + 1]; sx1[i] = uv[2 * c1]; sy1[i] = uv[2 * c1 + 1]; sc[i] = faceChart[f];
+      segmentComponent[i] = componentOf[f];
       lens[i] = Math.hypot(sx1[i] - sx0[i], sy1[i] - sy0[i]);
       minX = Math.min(minX, sx0[i], sx1[i]); maxX = Math.max(maxX, sx0[i], sx1[i]);
       minY = Math.min(minY, sy0[i], sy1[i]); maxY = Math.max(maxY, sy0[i], sy1[i]);
     }
     const selfSet = new Set(), pairSet = new Set(), contained = [];
+    let complete = true;
     if (nS > 1) {
       const sorted = Float64Array.from(lens).sort();
       const spanX = Math.max(maxX - minX, 1e-12), spanY = Math.max(maxY - minY, 1e-12);
@@ -419,12 +477,12 @@ UVCore.define('metrics', function (C) {
       const shares = (i, j) => (sx0[i] === sx0[j] && sy0[i] === sy0[j]) || (sx0[i] === sx1[j] && sy0[i] === sy1[j]) || (sx1[i] === sx0[j] && sy1[i] === sy0[j]) || (sx1[i] === sx1[j] && sy1[i] === sy1[j]);
       const maxPairs = 20000000;
       let tested = 0;
-      for (let c = 0; c < GX * GY && tested < maxPairs; c++) {
+      intersectionChecks: for (let c = 0; c < GX * GY; c++) {
         for (let p = count[c]; p < count[c + 1]; p++) {
           const i = list[p];
           for (let q = p + 1; q < count[c + 1]; q++) {
             const j = list[q];
-            tested++;
+            if (tested++ >= maxPairs) { complete = false; break intersectionChecks; }
             if (shares(i, j)) continue;
             if (Math.max(sx0[i], sx1[i]) < Math.min(sx0[j], sx1[j]) || Math.max(sx0[j], sx1[j]) < Math.min(sx0[i], sx1[i])) continue;
             if (Math.max(sy0[i], sy1[i]) < Math.min(sy0[j], sy1[j]) || Math.max(sy0[j], sy1[j]) < Math.min(sy0[i], sy1[i])) continue;
@@ -437,18 +495,19 @@ UVCore.define('metrics', function (C) {
           }
         }
       }
-      // containment: an interior point of chart c inside chart d (even-odd over d's boundary)
-      const rep = new Float64Array(2 * chartCount).fill(NaN);
+      // Test connected UV components, even when callers assign one chart label
+      // to several pieces. A nested disconnected piece is an overlap too.
+      const rep = new Float64Array(2 * componentCount).fill(NaN);
       for (let f = 0; f < F; f++) {
-        const ch = faceChart[f];
-        if (ch < 0 || faceFlag[f] !== 0 || !isNaN(rep[2 * ch])) continue;
+        const ch = componentOf[f];
+        if (faceChart[f] < 0 || faceFlag[f] !== 0 || !isNaN(rep[2 * ch])) continue;
         rep[2 * ch] = (uv[6 * f] + uv[6 * f + 2] + uv[6 * f + 4]) / 3;
         rep[2 * ch + 1] = (uv[6 * f + 1] + uv[6 * f + 3] + uv[6 * f + 5]) / 3;
       }
-      if (chartCount > 1) {
-        const crossings = new Int32Array(chartCount);
+      if (componentCount > 1) {
+        const crossings = new Int32Array(componentCount);
         const touched = [];
-        for (let c = 0; c < chartCount; c++) {
+        for (let c = 0; c < componentCount; c++) {
           const px = rep[2 * c], py = rep[2 * c + 1];
           if (isNaN(px) || px < minX || px > maxX || py < minY || py > maxY) continue;
           const cy = cellOf(py - minY, GY), cx0 = cellOf(px - minX, GX);
@@ -458,16 +517,21 @@ UVCore.define('metrics', function (C) {
             const cc = cy * GX + x;
             for (let p = count[cc]; p < count[cc + 1]; p++) {
               const i = list[p];
-              if (sc[i] === c || seen.has(i)) continue;
+              if (segmentComponent[i] === c || seen.has(i)) continue;
               seen.add(i);
               const yA = sy0[i], yB = sy1[i];
               if ((yA > py) === (yB > py)) continue;
               const xi = sx0[i] + (py - yA) * (sx1[i] - sx0[i]) / (yB - yA);
-              if (xi > px) { if (!crossings[sc[i]]) touched.push(sc[i]); crossings[sc[i]]++; }
+              const owner = segmentComponent[i];
+              if (xi > px) { if (!crossings[owner]) touched.push(owner); crossings[owner]++; }
             }
           }
           for (const d of touched) {
-            if (crossings[d] & 1) { contained.push(c); pairSet.add(Math.min(c, d) + ',' + Math.max(c, d)); }
+            if (crossings[d] & 1) {
+              const a = componentCharts[c], b = componentCharts[d];
+              contained.push(a);
+              if (a === b) selfSet.add(a); else pairSet.add(Math.min(a, b) + ',' + Math.max(a, b));
+            }
             crossings[d] = 0;
           }
         }
@@ -477,7 +541,7 @@ UVCore.define('metrics', function (C) {
     const self = Array.from(selfSet);
     const badCharts = new Set(self);
     for (const [a, b] of pairs) { badCharts.add(a); badCharts.add(b); }
-    return { self, pairs, contained: Array.from(new Set(contained)), valid: flipped === 0 && self.length === 0 && pairs.length === 0, badCharts };
+    return { self, pairs, contained: Array.from(new Set(contained)), complete, valid: complete && flipped === 0 && self.length === 0 && pairs.length === 0, badCharts };
   }
 
   /* Does a disk chart's UV boundary (local.boundaryLoops, local.uv) cross
@@ -527,7 +591,8 @@ UVCore.define('metrics', function (C) {
     return false;
   }
 
-  /* Texel-centre coverage; overlap = a centre strictly inside faces of two different charts. */
+  /* Texel-centre coverage; strict interiors avoid false positives at shared edges.
+   * Store face ownership so folds and disconnected overlaps inside one chart count. */
   function rasterCoverage(uv, faceChart, faceFlag, F, R) {
     const owner = new Int32Array(R * R).fill(-1);
     let covered = 0, overlapTexels = 0;
@@ -550,8 +615,8 @@ UVCore.define('metrics', function (C) {
           const w0 = 1 - w1 - w2;
           if (!(w0 > 1e-9 && w1 > 1e-9 && w2 > 1e-9)) continue;
           const cell = py * R + px, cur = owner[cell];
-          if (cur === -1) { owner[cell] = ch; covered++; }
-          else if (cur !== ch && !conflict[cell]) { conflict[cell] = 1; overlapTexels++; }
+          if (cur === -1) { owner[cell] = f; covered++; }
+          else if (cur !== f && !conflict[cell]) { conflict[cell] = 1; overlapTexels++; }
         }
       }
     }
@@ -592,16 +657,26 @@ UVCore.define('metrics', function (C) {
     }
     let total = den > 0 ? num / den : 0;
     const bij = m.bijectivity || { valid: true };
-    const valid = !!bij.valid && m.flipped === 0;
+    const valid = !!bij.valid && m.flipped === 0 && !(m.degenerate > 0) && !(m.nonFinite > 0) && !(m.outOfRange > 0) && !(m.unassignedFaces > 0) && !(m.overlapTexels > 0) && m.faces !== 0;
     let gate = null;
-    if (!valid) gate = { cap: 0.49, reason: m.flipped > 0 ? m.flipped + ' flipped triangle(s)' : 'overlapping or self-intersecting charts' };
-    else if (m.outOfRange > 0) gate = { cap: 0.49, reason: m.outOfRange + ' face(s) outside the 0-1 UV square' };
-    else if (opts.paddingTexels !== undefined && m.bake && m.bake.maxSafeMip < preset.targetMip) gate = { cap: 0.89, reason: 'padding is only mip-safe to level ' + m.bake.maxSafeMip + ' (preset wants ' + preset.targetMip + ')' };
+    if (!valid) {
+      let reason = 'overlapping or self-intersecting charts';
+      if (m.faces === 0) reason = 'no faces to evaluate';
+      else if (m.nonFinite > 0) reason = m.nonFinite + ' face(s) with non-finite coordinates or arithmetic';
+      else if (m.degenerate > 0) reason = m.degenerate + ' degenerate triangle(s)';
+      else if (m.outOfRange > 0) reason = m.outOfRange + ' face(s) outside the 0-1 UV square';
+      else if (m.unassignedFaces > 0) reason = m.unassignedFaces + ' face(s) without a UV chart';
+      else if (m.flipped > 0) reason = m.flipped + ' flipped triangle(s)';
+      else if (bij.complete === false) reason = 'overlap validation exceeded its comparison budget';
+      gate = { cap: 0.49, reason };
+    }
+    else if (m.bake && m.bake.paddingKnown === false) gate = { cap: 0.89, reason: 'UV padding has not been measured or established by the packer' };
+    else if (m.bake && m.bake.maxSafeMip < preset.targetMip) gate = { cap: 0.89, reason: 'padding supports an estimated mip level ' + m.bake.maxSafeMip + ' (preset wants ' + preset.targetMip + ')' };
     if (gate) total = Math.min(total, gate.cap);
     const explanations = Object.keys(components)
       .map(k => ({ metric: k, gain: den > 0 ? preset.weights[k] * (Math.max(components[k].score, 0.9) - components[k].score) * 100 / den : 0, message: ACTIONS[k].message, action: ACTIONS[k].action }))
       .filter(e => e.gain > 0.5).sort((a, b) => b.gain - a.gain).slice(0, 3);
-    if (gate) explanations.unshift({ metric: 'gate', gain: 0, message: 'Capped: ' + gate.reason, action: gate.cap < 0.5 ? 'Fix flips/overlaps first (Relax, or re-unwrap with Tutte fallback)' : 'Increase padding or lower the target mip' });
+    if (gate) explanations.unshift({ metric: 'gate', gain: 0, message: 'Capped: ' + gate.reason, action: gate.cap < 0.5 ? 'Repair invalid geometry or UVs, then re-unwrap and validate' : 'Repack with known padding or lower the target mip' });
     const score = Math.round(total * 100);
     return { score, valid, gate, components, grades, explanations, withinBound: (m.sdP99 || Infinity) <= preset.sdP99Bound, J: 100 - total * 100, preset: Object.keys(PRESETS).find(k => PRESETS[k] === preset) };
   }

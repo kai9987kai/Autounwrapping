@@ -14,9 +14,9 @@
 
   const OPS = ['setMesh', 'meshInfo', 'setCut', 'getCut', 'getManualCut', 'toggleSeamEdge', 'setSeamEdges', 'seamsFromAngle', 'clearSeams',
     'edgeSegments', 'setSourceUV', 'analyzeSource', 'seamsFromSourceUV', 'unwrap', 'relax', 'repack', 'optimizeSearch', 'metrics',
-    'snapshot', 'restore', 'defaults', 'capabilities', 'version'];
+    'snapshot', 'restore', 'adoptSource', 'transformChart', 'defaults', 'capabilities', 'version'];
   const STATEFUL = ['setMesh', 'setCut', 'setSourceUV'];
-  const MUTATES_SEAMS = ['toggleSeamEdge', 'setSeamEdges', 'seamsFromAngle', 'clearSeams', 'seamsFromSourceUV'];
+  const MUTATES_SEAMS = ['toggleSeamEdge', 'setSeamEdges', 'seamsFromAngle', 'clearSeams', 'seamsFromSourceUV', 'restore', 'adoptSource'];
 
   function cancelError() { const e = new Error('Operation cancelled'); e.name = 'CancelError'; return e; }
 
@@ -39,14 +39,18 @@
       this.ready = Promise.resolve();   // settles when a restart (after cancel / crash) has replayed state
       this.worker = null;
       this.engine = null;
+      this.disposed = false;
+      this.abortStart = null;
       for (const op of OPS) if (!this[op]) this[op] = (...args) => this.call(op, ...args);
     }
 
     async init() {
+      if (this.disposed) throw cancelError();
       if (!this.forceMain) {
         try { await this.spawnWorker(); this.mode = 'worker'; return this; }
         catch (err) { this.workerError = err; if (this.worker) { try { this.worker.terminate(); } catch (e) { /* ignore */ } this.worker = null; } }
       }
+      if (this.disposed) throw cancelError();
       this.startMain();
       return this;
     }
@@ -69,12 +73,20 @@
             url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
             worker = new Worker(url);
           }
-        } catch (e) { reject(e); return; }
-        const timer = setTimeout(() => { cleanup(); reject(new Error('Worker did not become ready within ' + this.readyTimeoutMs + ' ms')); }, this.readyTimeoutMs);
-        const cleanup = () => { clearTimeout(timer); if (url) setTimeout(() => URL.revokeObjectURL(url), 0); };
+        } catch (e) { if (url) URL.revokeObjectURL(url); reject(e); return; }
+        const timer = setTimeout(() => fail(new Error('Worker did not become ready within ' + this.readyTimeoutMs + ' ms')), this.readyTimeoutMs);
+        const cleanup = () => { clearTimeout(timer); this.abortStart = null; if (url) URL.revokeObjectURL(url); };
+        const fail = (error) => {
+          cleanup();
+          worker.onmessage = worker.onerror = null;
+          try { worker.terminate(); } catch (e) { /* ignore */ }
+          reject(error);
+        };
+        this.abortStart = () => fail(cancelError());
         worker.onmessage = (ev) => {
           const msg = ev.data || {};
           if (msg.type === 'ready') {
+            if (this.disposed) { fail(cancelError()); return; }
             cleanup();
             this.worker = worker;
             this.methods = msg.methods || [];
@@ -83,7 +95,7 @@
             resolve();
           }
         };
-        worker.onerror = (e) => { cleanup(); reject(new Error('Worker failed to start: ' + (e && e.message ? e.message : 'unknown error'))); };
+        worker.onerror = (e) => fail(new Error('Worker failed to start: ' + (e && e.message ? e.message : 'unknown error')));
       });
     }
 
@@ -92,6 +104,7 @@
 
     call(op, ...args) {
       return new Promise((resolve, reject) => {
+        if (this.disposed) { reject(cancelError()); return; }
         this.queue.push({ id: this.nextId++, op, args, resolve, reject, transfer: null });
         this.pump();
       });
@@ -100,6 +113,7 @@
     /* Like call(), transferring the given buffers to the worker (the caller loses them). */
     callTransfer(op, args, transfer) {
       return new Promise((resolve, reject) => {
+        if (this.disposed) { reject(cancelError()); return; }
         this.queue.push({ id: this.nextId++, op, args, resolve, reject, transfer });
         this.pump();
       });
@@ -113,14 +127,20 @@
     }
 
     pump() {
-      if (this.active || !this.queue.length || this.restarting) return;
+      if (this.disposed || this.active || !this.queue.length || this.restarting) return;
       const job = this.active = this.queue.shift();
-      if (!job.noRecord) this.record(job.op, job.args);
+      // Retain a candidate before transferable buffers are detached, but only
+      // commit it once the engine confirms that the operation succeeded.
+      const candidate = !job.noRecord && STATEFUL.indexOf(job.op) >= 0 ? job.args.map(a => ArrayBuffer.isView(a) ? a.slice() : a) : null;
       const done = (fn, v) => {
         if (this.active !== job) return;
         this.active = null;
-        if (MUTATES_SEAMS.indexOf(job.op) >= 0 && this.mode === 'worker') this.refreshSeamReplay();
-        fn(v);
+        if (fn === job.resolve && candidate) this.record(job.op, candidate);
+        if (fn === job.resolve && MUTATES_SEAMS.indexOf(job.op) >= 0) {
+          // A successful mutation is not acknowledged until its replay state is
+          // captured. Immediate cancellation must not lose just-edited seams.
+          this.refreshSeamReplay(() => fn(v), job.reject);
+        } else fn(v);
         this.pump();
       };
       job.done = done;
@@ -153,9 +173,9 @@
       }, 0);
     }
 
-    refreshSeamReplay() {
+    refreshSeamReplay(resolve, reject) {
       // seams edited incrementally: keep a fresh full copy for replay after a respawn
-      this.queue.unshift({ id: this.nextId++, op: 'getManualCut', args: [], resolve: (cut) => { if (cut) this.replay.set('setCut', [cut]); }, reject: () => {}, internal: true });
+      this.queue.unshift({ id: this.nextId++, op: 'getManualCut', args: [], resolve: (cut) => { if (cut) this.replay.set('setCut', [cut]); if (resolve) resolve(); }, reject: reject || (() => {}), internal: true });
     }
 
     onWorkerMessage(msg) {
@@ -176,7 +196,9 @@
      * the engine state (mesh, source UVs, seams). Calls issued while restarting wait
      * in the queue and run after the replay, so they always see the restored state. */
     hardRestart(reason) {
-      const pending = (this.active ? [this.active] : []).concat(this.queue.filter(j => !j.internal));
+      if (this.disposed) return Promise.resolve();
+      if (this.restarting) return this.ready;
+      const pending = (this.active ? [this.active] : []).concat(this.queue);
       this.active = null;
       this.queue = [];
       this.restarting = true;
@@ -184,8 +206,9 @@
       for (const j of pending) j.reject(reason);
       const entries = ['setMesh', 'setSourceUV', 'setCut'].filter(op => this.replay.has(op)).map(op => [op, this.replay.get(op)]);
       this.ready = (async () => {
-        try { await this.spawnWorker(); }
-        catch (e) { this.startMain(); }
+        try { await this.spawnWorker(); this.mode = 'worker'; }
+        catch (e) { if (!this.disposed) this.startMain(); }
+        if (this.disposed) { this.restarting = false; return; }
         const userJobs = this.queue.splice(0);
         const replayed = entries.map(([op, args]) => new Promise((resolve) => {
           this.queue.push({ id: this.nextId++, op, args: args.map(a => ArrayBuffer.isView(a) ? a.slice() : a), resolve, reject: resolve, internal: true, noRecord: true });
@@ -213,10 +236,17 @@
     markStateful(op) { if (STATEFUL.indexOf(op) < 0) STATEFUL.push(op); }
 
     dispose() {
+      this.disposed = true;
+      if (this.abortStart) this.abortStart();
       if (this.worker) this.worker.terminate();
       this.worker = null;
+      if (this.active) this.active.reject(cancelError());
+      this.active = null;
       for (const j of this.queue) j.reject(cancelError());
       this.queue = [];
+      this.listeners.clear();
+      this.replay.clear();
+      this.engine = null;
     }
   }
 

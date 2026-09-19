@@ -12,6 +12,9 @@ UVCore.define('mesh', function (C) {
   function buildMesh(positions, opts) {
     opts = opts || {};
     if (!(positions instanceof Float32Array) && !(positions instanceof Float64Array)) positions = new Float32Array(positions);
+    if (positions.length % 9) throw new Error('Mesh positions must contain complete triangles (9 coordinates per face).');
+    for (let i = 0; i < positions.length; i++) if (!Number.isFinite(positions[i])) throw new Error('Mesh positions must be finite.');
+    if (opts.weldTolerance !== undefined && (!Number.isFinite(opts.weldTolerance) || opts.weldTolerance <= 0)) throw new Error('Weld tolerance must be finite and positive.');
     const cornerCount = Math.floor(positions.length / 3);
     const faceCount = Math.floor(cornerCount / 3);
 
@@ -153,7 +156,7 @@ UVCore.define('mesh', function (C) {
     }
     const componentCount = faceCount ? uf.count : 0;
 
-    return {
+    const mesh = {
       positions, faceCount,
       cornerWeld, weldCount, weldPos,
       faceNormals, faceAreas, faceCentroids,
@@ -166,6 +169,50 @@ UVCore.define('mesh', function (C) {
       eulerCharacteristic: weldCount - edgeCount + faceCount,
       weldTolerance: tol
     };
+    mesh.diagnostics = inspectMesh(mesh);
+    return mesh;
+  }
+
+  /* Read-only preflight. Boundaries are valid for open surfaces; duplicate faces,
+   * collapsed triangles and inconsistent winding deserve attention before baking. */
+  function inspectMesh(mesh) {
+    const seen = new Map(), issues = [];
+    let duplicateFaces = 0, degenerateFaces = 0, sliverFaces = 0, inconsistentEdges = 0;
+    let minimumQuality = mesh.faceCount ? 1 : 0;
+    for (let f = 0; f < mesh.faceCount; f++) {
+      const ids = Array.from(mesh.cornerWeld.subarray(3 * f, 3 * f + 3)).sort((a, b) => a - b);
+      const key = ids.join(':');
+      if (seen.has(key)) duplicateFaces++; else seen.set(key, f);
+      const p = mesh.positions, b = 9 * f;
+      let length2 = 0;
+      for (let k = 0; k < 3; k++) for (let d = 0; d < 3; d++) length2 += (p[b + 3 * k + d] - p[b + 3 * ((k + 1) % 3) + d]) ** 2;
+      const quality = length2 > 0 ? 4 * Math.sqrt(3) * mesh.faceAreas[f] / length2 : 0;
+      minimumQuality = Math.min(minimumQuality, quality);
+      if (!(mesh.faceAreas[f] > 0) || ids[0] === ids[1] || ids[1] === ids[2]) degenerateFaces++;
+      else if (quality < 0.01) sliverFaces++;
+    }
+    for (let e = 0; e < mesh.edgeCount; e++) {
+      const s = mesh.edgeFaceStart[e];
+      if (mesh.edgeFaceStart[e + 1] - s !== 2) continue;
+      let direction = 0;
+      for (let j = 0; j < 2; j++) {
+        const f = mesh.edgeFaceList[s + j];
+        for (let k = 0; k < 3; k++) if (mesh.faceEdges[3 * f + k] === e) {
+          direction += mesh.cornerWeld[3 * f + k] === mesh.edgeVerts[2 * e] ? 1 : -1;
+          break;
+        }
+      }
+      if (direction !== 0) inconsistentEdges++;
+    }
+    if (duplicateFaces) issues.push({ severity: 'error', count: duplicateFaces, message: 'Duplicate triangles', action: 'Remove duplicate faces in your mesh editor before unwrapping.' });
+    if (degenerateFaces) issues.push({ severity: 'error', count: degenerateFaces, message: 'Collapsed or weld-collapsed triangles', action: 'Remove zero-area faces or adjust the mesh scale before unwrapping.' });
+    if (mesh.nonManifoldEdgeCount) issues.push({ severity: 'warning', count: mesh.nonManifoldEdgeCount, message: 'Non-manifold edges', action: 'The unwrap treats these edges as seams. Inspect overlapping or internal surfaces.' });
+    if (inconsistentEdges) issues.push({ severity: 'warning', count: inconsistentEdges, message: 'Inconsistent face winding', action: 'Recalculate face orientation in your mesh editor. These edges become seams.' });
+    if (sliverFaces) issues.push({ severity: 'warning', count: sliverFaces, message: 'Very thin triangles', action: 'Consider remeshing if flattening produces unstable or stretched charts.' });
+    return { duplicateFaces, degenerateFaces, sliverFaces, inconsistentEdges, minimumQuality,
+      boundaryEdges: mesh.boundaryEdgeCount, nonManifoldEdges: mesh.nonManifoldEdgeCount,
+      components: mesh.componentCount, closed: mesh.faceCount > 0 && mesh.boundaryEdgeCount === 0,
+      healthy: issues.length === 0, issues };
   }
 
   /* dot(n1, n2) of the two faces across a manifold edge; 1 for boundary or

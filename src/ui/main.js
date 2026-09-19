@@ -45,6 +45,7 @@
   }
   function setBusy(on, label) {
     state.busy = on;
+    document.querySelectorAll('[data-setting], #preset, #btn-examples, #btn-export, #btn-adopt-source, #btn-transform-chart').forEach(el => { el.disabled = on; });
     for (const id of ['btn-unwrap', 'btn-relax', 'btn-repack', 'btn-search', 'btn-open', 'btn-bake', 'btn-benchmark', 'btn-pin']) if ($(id)) $(id).disabled = on || ($(id).dataset.needs === 'result' && !state.result);
     $('btn-cancel').hidden = !on;
     if (on) { setStatus(label || 'Working…'); setProgress(0, true); }
@@ -60,6 +61,8 @@
     const hasMap = !!(state.model && state.model.materials.some(m => m.map));
     $('btn-analyze-source').disabled = state.busy || !hasUV;
     $('btn-seams-source').disabled = state.busy || !hasUV;
+    $('btn-adopt-source').disabled = state.busy || !hasUV;
+    $('btn-transform-chart').disabled = state.busy || state.selected < 0 || !!state.analysis || !hasCharts;
     $('btn-bake').disabled = state.busy || !hasUV || !state.result;
     $('bake-hint').textContent = hasUV ? (hasMap ? 'This model has a texture: re-bake it onto the new UVs.' : 'Imported UVs found (no texture): re-bake transfers material colours.') : 'Load a textured glTF / GLB / OBJ to transfer its texture onto the new UVs.';
     $('view-texture').querySelector('[value="original"]').disabled = !(hasUV && hasMap);
@@ -146,6 +149,12 @@
     opts = opts || {};
     state.result = r;
     state.analysis = null;
+    if (r.opts) {
+      state.settings = clone(r.opts);
+      state.presetKey = r.opts.preset || 'game_hero';
+      syncControls();
+      save(LS.settings, { presetKey: state.presetKey, settings: state.settings });
+    }
     state.selected = -1;
     if (state.baked) state.bakeStale = true;
     state.viewport.setResult(r);
@@ -180,6 +189,7 @@
     state.viewport.highlightChart(id);
     if (from !== 'uv') state.uvView.select(id);
     U.panels.renderChart(chartInfo(id));
+    updateButtons();
   }
 
   /* ---------------- engine operations ---------------- */
@@ -254,6 +264,14 @@
   const runUnwrap = () => run('Unwrap', () => state.client.unwrap(state.settings));
   const runRelax = () => run('Relax', () => state.client.relax(Object.assign({}, state.settings, { iterations: Math.max(24, state.settings.iterations * 2) })));
   const runRepack = () => run('Repack', () => state.client.repack(state.settings));
+  const adoptSource = () => run('Use imported layout', () => state.client.adoptSource(state.settings));
+  async function transformSelected() {
+    const id = state.selected;
+    if (id < 0 || state.analysis) return;
+    const edit = { rotateDegrees: Number($('chart-rotation').value), scale: Number($('chart-scale').value), offsetU: Number($('chart-u').value), offsetV: Number($('chart-v').value) };
+    const r = await run('Edit chart ' + id, () => state.client.transformChart(id, edit));
+    if (r && r.metrics) selectChart(id);
+  }
   async function runSearch() {
     const r = await run('Auto-tune', () => state.client.optimizeSearch(state.settings));
     if (r && r.trials) {

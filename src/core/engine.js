@@ -9,7 +9,7 @@
 UVCore.define('engine', function (C) {
   'use strict';
 
-  const VERSION = '4.0.0';
+  const VERSION = '4.1.0';
   const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 
   const DEFAULTS = {
@@ -44,6 +44,36 @@ UVCore.define('engine', function (C) {
     return { opts, progress, shouldCancel };
   }
 
+  function rectFromFaces(faces, uv) {
+    let x = Infinity, y = Infinity, right = -Infinity, top = -Infinity;
+    for (const f of faces) for (let k = 0; k < 3; k++) {
+      const p = 6 * f + 2 * k;
+      x = Math.min(x, uv[p]); y = Math.min(y, uv[p + 1]);
+      right = Math.max(right, uv[p]); top = Math.max(top, uv[p + 1]);
+    }
+    return Number.isFinite(x) ? { x, y, w: right - x, h: top - y } : null;
+  }
+
+  /* Rebuild an explicitly split local without welding away artist UV seams. */
+  function localFromTris(mesh, faces, tris, nVerts) {
+    const local = {
+      faces: Int32Array.from(faces), tris: Int32Array.from(tris), nVerts,
+      lp: new Float64Array(3 * nVerts), localWeld: new Int32Array(nVerts),
+      uv: new Float64Array(2 * nVerts), area3D: 0
+    };
+    for (let t = 0; t < faces.length; t++) {
+      const f = faces[t];
+      local.area3D += mesh.faceAreas[f];
+      for (let k = 0; k < 3; k++) {
+        const v = tris[3 * t + k], c = 3 * f + k;
+        local.localWeld[v] = mesh.cornerWeld[c];
+        for (let a = 0; a < 3; a++) local.lp[3 * v + a] = mesh.positions[3 * c + a];
+      }
+    }
+    C.chartTopology(local);
+    return local;
+  }
+
   class UVEngine {
     constructor() {
       this.mesh = null;
@@ -64,6 +94,8 @@ UVCore.define('engine', function (C) {
         optimizers: ['slim', 'arap', 'none'],
         packMethods: ['bitmap', 'skyline'],
         presets: Object.keys(C.PRESETS).filter(k => k !== 'vfx'),
+        importedUVEditing: true,
+        chartTransforms: true,
         visibility: typeof C.computeVisibility === 'function'
       };
     }
@@ -88,7 +120,8 @@ UVCore.define('engine', function (C) {
         boundaryEdgeCount: m.boundaryEdgeCount, nonManifoldEdgeCount: m.nonManifoldEdgeCount,
         componentCount: m.componentCount, eulerCharacteristic: m.eulerCharacteristic,
         surfaceArea: m.surfaceArea, bbox: { min: m.bbox.min.slice(), max: m.bbox.max.slice() },
-        weldTolerance: m.weldTolerance
+        weldTolerance: m.weldTolerance,
+        diagnostics: m.diagnostics ? JSON.parse(JSON.stringify(m.diagnostics)) : null
       };
     }
 
@@ -151,7 +184,9 @@ UVCore.define('engine', function (C) {
       const m = this._requireMesh();
       if (!uv || typeof uv === 'function') { this.sourceUV = null; return null; }
       if (uv.length !== 6 * m.faceCount) throw new Error('setSourceUV: expected ' + (6 * m.faceCount) + ' values, got ' + uv.length);
-      this.sourceUV = Float32Array.from(uv);
+      const source = Float32Array.from(uv);
+      if (!source.every(Number.isFinite)) throw new Error('setSourceUV: all UV coordinates must be finite.');
+      this.sourceUV = source;
       return C.islandsFromUV(m, this.sourceUV).chartCount;
     }
 
@@ -160,7 +195,58 @@ UVCore.define('engine', function (C) {
       const m = this._requireMesh();
       if (!this.sourceUV) throw new Error('The model has no imported UVs to analyse.');
       const o = merge(DEFAULTS, opts);
-      return C.computeMetrics(m, this.sourceUV, null, null, { preset: o.preset, resolution: o.packing.resolution, paddingTexels: o.packing.paddingTexels, rasterRes: Math.min(1024, o.packing.resolution) });
+      return C.computeMetrics(m, this.sourceUV, null, null, { preset: o.preset, resolution: o.packing.resolution, requestedPaddingTexels: o.packing.paddingTexels, rasterRes: Math.min(1024, o.packing.resolution) });
+    }
+
+    _sourceCuts() {
+      const m = this.mesh, uv = this.sourceUV, cut = new Uint8Array(m.edgeCount);
+      const corner = (f, w) => {
+        for (let k = 0; k < 3; k++) if (m.cornerWeld[3 * f + k] === w) return 3 * f + k;
+        return -1;
+      };
+      for (let e = 0; e < m.edgeCount; e++) {
+        const start = m.edgeFaceStart[e], end = m.edgeFaceStart[e + 1];
+        if (end - start < 2) continue;
+        const f = m.edgeFaceList[start];
+        for (let i = start + 1; i < end && !cut[e]; i++) for (let v = 0; v < 2; v++) {
+          const w = m.edgeVerts[2 * e + v], a = corner(f, w), b = corner(m.edgeFaceList[i], w);
+          if (a < 0 || b < 0 || uv[2 * a] !== uv[2 * b] || uv[2 * a + 1] !== uv[2 * b + 1]) { cut[e] = 1; break; }
+        }
+      }
+      return cut;
+    }
+
+    /* Adopt, without flattening or moving even one imported UV corner. */
+    adoptSource(...args) {
+      const { opts, progress, shouldCancel } = cb(args);
+      const m = this._requireMesh();
+      if (!this.sourceUV) throw new Error('The model has no imported UVs to adopt.');
+      const t0 = now(), o = merge(DEFAULTS, opts), uv = Float32Array.from(this.sourceUV);
+      const cut = this._sourceCuts(), isl = C.islandsFromUV(m, uv);
+      const groups = Array.from({ length: isl.chartCount }, () => []);
+      for (let f = 0; f < m.faceCount; f++) groups[isl.faceChart[f]].push(f);
+      const charts = [];
+      for (let i = 0; i < groups.length; i++) {
+        if (shouldCancel && shouldCancel()) return { cancelled: true };
+        const base = C.buildChartLocal(m, groups[i], cut), ids = new Map(), values = [], tris = [];
+        // Degenerate geometry and sub-epsilon UV differences must also retain
+        // their original corner coordinates instead of a last-corner overwrite.
+        for (let t = 0; t < base.faces.length; t++) for (let k = 0; k < 3; k++) {
+          const p = 6 * base.faces[t] + 2 * k, key = base.tris[3 * t + k] + ':' + uv[p] + ':' + uv[p + 1];
+          let v = ids.get(key);
+          if (v === undefined) { v = ids.size; ids.set(key, v); values.push(uv[p], uv[p + 1]); }
+          tris.push(v);
+        }
+        const local = localFromTris(m, base.faces, tris, ids.size);
+        local.uv.set(values);
+        charts.push({ faces: local.faces, local, rect: rectFromFaces(local.faces, uv), init: { method: 'imported', fallbacks: [] }, opt: null, flips: C.countFlips(local) });
+        if (progress) progress('adopt', i + 1, groups.length);
+      }
+      if (shouldCancel && shouldCancel()) return { cancelled: true };
+      const timings = { segment: 0, topology: now() - t0, flatten: 0, optimize: 0, pack: 0, metrics: 0, total: 0 };
+      this.lastCut = cut;
+      this.state = { opts: o, charts, uv, faceChart: isl.faceChart, cut, packing: null, imported: true, notes: ['Adopted ' + charts.length + ' imported UV island(s); original coordinates and seams preserved. Padding is unknown until repacked.'], timings };
+      return this._finish(timings, t0, progress);
     }
 
     /* Imported UV discontinuities become manual seams (artist seams are kept). */
@@ -168,18 +254,15 @@ UVCore.define('engine', function (C) {
       const m = this._requireMesh();
       if (!this.sourceUV) throw new Error('The model has no imported UVs.');
       const isl = C.islandsFromUV(m, this.sourceUV);
-      const probe = C.computeMetrics(m, this.sourceUV, isl.faceChart, null, { rasterRes: 16 });
+      const cut = this._sourceCuts();
       let n = 0;
-      // seamSegments come from seam flags; recompute the flags cheaply
+      let seamEdges = 0;
       for (let e = 0; e < m.edgeCount; e++) {
-        const s = m.edgeFaceStart[e], cnt = m.edgeFaceStart[e + 1] - s;
-        if (cnt < 2) continue;
-        const f0 = m.edgeFaceList[s];
-        for (let i = 1; i < cnt; i++) {
-          if (isl.faceChart[m.edgeFaceList[s + i]] !== isl.faceChart[f0]) { if (!this.manualCut[e]) { this.manualCut[e] = 1; n++; } break; }
-        }
+        if (!cut[e]) continue;
+        seamEdges++;
+        if (!this.manualCut[e]) { this.manualCut[e] = 1; n++; }
       }
-      return { added: n, islands: isl.chartCount, seamEdges: probe.seamEdgeCount };
+      return { added: n, islands: isl.chartCount, seamEdges };
     }
 
     /* ---------------- pipeline ---------------- */
@@ -315,7 +398,7 @@ UVCore.define('engine', function (C) {
         st.charts[ci].transform = res.transforms[ci];
       }
       st.uv = uv; st.faceChart = faceChart;
-      st.packing = { method: o.packing.method, coverage: res.coverage, chartCoverage: res.chartCoverage, efficiency: res.efficiency, texelsPerUnit: res.texelsPerUnit, resolution: res.resolution, extent: res.extent, overlapTexels: res.overlapTexels, mirroredCharts: res.mirroredCharts, restarts: res.restarts };
+      st.packing = { method: o.packing.method, coverage: res.coverage, chartCoverage: res.chartCoverage, efficiency: res.efficiency, texelsPerUnit: res.texelsPerUnit, resolution: res.resolution, extent: res.extent, overlapTexels: res.overlapTexels, mirroredCharts: res.mirroredCharts, restarts: res.restarts, effectivePadding: Number.isFinite(res.effectivePadding) ? res.effectivePadding : null };
       if (res.mirroredCharts.length) st.notes.push(res.mirroredCharts.length + ' mirrored chart(s) packed as-is.');
       st.packing.fits = res.fits !== false;
       if (res.fits === false) st.notes.push('Charts did not fit at ' + res.resolution + 'px with ' + o.packing.paddingTexels + ' texel padding: padding was reduced to about ' + res.effectivePadding.toFixed(1) + ' texels. Raise the texture size, lower the padding or use fewer charts.');
@@ -326,11 +409,9 @@ UVCore.define('engine', function (C) {
       const m = this.mesh, st = this.state, o = st.opts;
       const t = now();
       if (progress) progress('metrics', 0, 1);
-      const metrics = C.computeMetrics(m, st.uv, st.faceChart, st.cut, {
-        preset: o.preset, resolution: o.packing.resolution, paddingTexels: st.packing ? o.packing.paddingTexels : undefined,
-        rasterRes: Math.min(1024, o.packing.resolution),
+      const metrics = C.computeMetrics(m, st.uv, st.faceChart, st.cut, Object.assign(this._metricOptions(o), {
         edgeVis: this.visCache && o.seams && o.seams.visibility ? this.visCache.vis.edgeVis : undefined
-      });
+      }));
       this._computeSeamFlags(st);
       timings.metrics = now() - t;
       timings.total = now() - t0;
@@ -366,12 +447,12 @@ UVCore.define('engine', function (C) {
         seamSegments: metrics.seamSegments,
         notes: st.notes.slice(), timings: Object.assign({}, st.timings),
         metrics, packing: st.packing ? Object.assign({}, st.packing) : null,
-        opts: JSON.parse(JSON.stringify(st.opts)), projection: !!st.projection
+        opts: JSON.parse(JSON.stringify(st.opts)), projection: !!st.projection, imported: !!st.imported
       };
     }
 
     _requireCharts(what) {
-      if (!this.state || !this.state.charts.length) throw new Error(what + ' needs an atlas, box or whole unwrap first.');
+      if (!this.state || !this.state.charts.length) throw new Error(what + ' needs an atlas, box or whole unwrap, or adopted imported UVs first.');
       return this.state;
     }
 
@@ -417,6 +498,44 @@ UVCore.define('engine', function (C) {
       return this._finish(st.timings, t0, progress);
     }
 
+    /* Transform a chart in atlas space; repack may reorient/equalize it later. */
+    transformChart(id, ...args) {
+      const { opts, progress } = cb(args), st = this._requireCharts('Transform');
+      if (!Number.isInteger(id) || id < 0 || id >= st.charts.length) throw new Error('transformChart: select a valid chart.');
+      const tr = Object.assign({ rotateDegrees: 0, scale: 1, offsetU: 0, offsetV: 0 }, opts || {});
+      for (const key of ['rotateDegrees', 'scale', 'offsetU', 'offsetV']) {
+        if (!Number.isFinite(tr[key])) throw new Error('transformChart: ' + key + ' must be finite.');
+      }
+      if (!(tr.scale > 0)) throw new Error('transformChart: scale must be positive.');
+      const t0 = now(), chart = st.charts[id], rect = rectFromFaces(chart.faces, st.uv);
+      const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+      const angle = (tr.rotateDegrees % 360) * Math.PI / 180, cs = Math.cos(angle), sn = Math.sin(angle);
+      const uv = Float32Array.from(st.uv), localUV = Float64Array.from(chart.local.uv);
+      for (const f of chart.faces) for (let k = 0; k < 3; k++) {
+        const p = 6 * f + 2 * k, u = uv[p] - cx, v = uv[p + 1] - cy;
+        uv[p] = cx + tr.scale * (cs * u - sn * v) + tr.offsetU;
+        uv[p + 1] = cy + tr.scale * (sn * u + cs * v) + tr.offsetV;
+        if (!Number.isFinite(uv[p]) || !Number.isFinite(uv[p + 1])) throw new Error('transformChart: transformed UVs exceed finite coordinate range.');
+      }
+      for (let p = 0; p < localUV.length; p += 2) {
+        const u = localUV[p], v = localUV[p + 1];
+        localUV[p] = tr.scale * (cs * u - sn * v);
+        localUV[p + 1] = tr.scale * (sn * u + cs * v);
+        if (!Number.isFinite(localUV[p]) || !Number.isFinite(localUV[p + 1])) throw new Error('transformChart: transformed chart exceeds finite coordinate range.');
+      }
+      chart.local.uv.set(localUV);
+      chart.rect = rectFromFaces(chart.faces, uv);
+      chart.transform = null;
+      chart.opt = null;
+      chart.flips = C.countFlips(chart.local);
+      st.uv = uv;
+      // Manual placement invalidates the packer's spacing and occupancy evidence.
+      st.packing = null;
+      st.timings = { segment: 0, topology: 0, flatten: 0, optimize: 0, pack: 0, metrics: 0, total: 0 };
+      st.notes = ['Transformed chart ' + (id + 1) + '. Padding is unknown until repacked; overlaps and atlas bounds are checked below.'];
+      return this._finish(st.timings, t0, progress);
+    }
+
     optimizeSearch(...args) {
       const { opts, progress, shouldCancel } = cb(args);
       const m = this._requireMesh();
@@ -445,16 +564,30 @@ UVCore.define('engine', function (C) {
       const { opts } = cb(args);
       if (!this.state) throw new Error('Nothing unwrapped yet.');
       const o = merge(this.state.opts, opts);
-      return C.computeMetrics(this.mesh, this.state.uv, this.state.faceChart, this.state.cut, { preset: o.preset, resolution: o.packing.resolution, paddingTexels: this.state.packing ? o.packing.paddingTexels : undefined, rasterRes: Math.min(1024, o.packing.resolution) });
+      return C.computeMetrics(this.mesh, this.state.uv, this.state.faceChart, this.state.cut, this._metricOptions(o));
+    }
+
+    _metricOptions(o) {
+      const packing = this.state && this.state.packing;
+      const resolution = packing ? packing.resolution : o.packing.resolution;
+      const effectivePadding = packing && packing.effectivePadding;
+      return {
+        preset: o.preset, resolution, rasterRes: Math.min(1024, resolution),
+        requestedPaddingTexels: o.packing.paddingTexels,
+        effectivePaddingTexels: Number.isFinite(effectivePadding) && effectivePadding >= 0 ? effectivePadding : undefined,
+        paddingSource: Number.isFinite(effectivePadding) && effectivePadding >= 0 ? 'packer' : undefined
+      };
     }
 
     /* ---------------- undo ---------------- */
-    /* Cheap fingerprint of the welded topology: snapshots only restore onto the same mesh. */
+    /* Fingerprint geometry as well as topology: scaled/deformed meshes differ. */
     _meshKey() {
       const m = this.mesh;
       let h = 0x811c9dc5;
       const cw = m.cornerWeld;
       for (let i = 0; i < cw.length; i++) { h ^= cw[i]; h = Math.imul(h, 0x01000193); }
+      const positions = new Uint8Array(m.positions.buffer, m.positions.byteOffset, m.positions.byteLength);
+      for (let i = 0; i < positions.length; i++) { h ^= positions[i]; h = Math.imul(h, 0x01000193); }
       return m.faceCount + ':' + m.edgeCount + ':' + m.weldCount + ':' + (h >>> 0).toString(16);
     }
 
@@ -469,8 +602,9 @@ UVCore.define('engine', function (C) {
         cut: Uint8Array.from(st.cut), manualCut: Uint8Array.from(this.manualCut),
         chartFaces: st.charts.map(c => Int32Array.from(c.faces)),
         chartUV: st.charts.map(c => Float64Array.from(c.local.uv)),
+        chartTris: st.charts.map(c => Int32Array.from(c.local.tris)),
         notes: st.notes.slice(), packing: st.packing ? JSON.parse(JSON.stringify(st.packing)) : null,
-        projection: !!st.projection
+        projection: !!st.projection, imported: !!st.imported
       };
     }
 

@@ -11,7 +11,7 @@
   <header class="topbar" role="banner">
     <div class="brand">
       <span class="logo" aria-hidden="true">◧</span>
-      <span class="brand-name">UV Toolkit</span><span class="badge">v4</span>
+      <span class="brand-name">UV Toolkit</span><span class="badge">v4.1</span>
     </div>
     <div class="model-chip" id="model-chip" title="Current model">No model</div>
 
@@ -170,6 +170,7 @@
         </div>
         <div class="row">
           <button id="btn-analyze-source" class="small" disabled>Grade imported UVs</button>
+          <button id="btn-adopt-source" class="small" disabled title="Keep the existing UV coordinates and islands; then edit, relax or repack them">Use imported layout</button>
           <button id="btn-benchmark" class="small ghost">Benchmark</button>
         </div>
       </details>
@@ -234,6 +235,11 @@
 
     <!-- ================= Right: results ================= -->
     <aside class="sidebar right" aria-label="Results">
+      <details class="card" id="mesh-health-card" open>
+        <summary>Mesh health <span class="tag" id="mesh-health-status">waiting</span></summary>
+        <p class="hint" id="mesh-health-summary">Load a mesh for a topology preflight.</p>
+        <ul class="health-list" id="mesh-health-issues"></ul>
+      </details>
       <section class="card score-card" id="score-card">
         <div class="gauge" id="gauge" aria-live="polite">
           <svg viewBox="0 0 120 120" aria-hidden="true">
@@ -271,6 +277,14 @@
       <section class="card" id="chart-card" hidden>
         <h3>Selected chart <span id="chart-id"></span></h3>
         <dl class="kv" id="chart-kv"></dl>
+        <div class="chart-edit">
+          <label>Rotate (°)<input type="number" id="chart-rotation" value="0" step="90" /></label>
+          <label>Scale<input type="number" id="chart-scale" value="1" min="0.01" step="0.1" /></label>
+          <label>Move U<input type="number" id="chart-u" value="0" step="0.01" /></label>
+          <label>Move V<input type="number" id="chart-v" value="0" step="0.01" /></label>
+        </div>
+        <button id="btn-transform-chart" class="small" disabled>Apply chart edit</button>
+        <p class="hint">Rotate and scale around the island centre. Edits support undo; check overlaps and repack to restore padding.</p>
       </section>
 
       <details class="card" open>

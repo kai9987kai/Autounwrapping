@@ -63,6 +63,13 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .check.inline { margin: 0; }
 .check input { accent-color: var(--accent); }
 .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+.chart-edit { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+.chart-edit label { font-size: 12px; color: var(--muted); }
+.chart-edit input { margin-top: 4px; }
+.health-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; }
+.health-list li { border-left: 2px solid var(--ok); padding-left: 8px; font-size: 12px; }
+.health-list li.error { border-color: var(--bad); }
+.health-list small { display: block; color: var(--muted); }
 
 /* ---------- top bar ---------- */
 .topbar {
