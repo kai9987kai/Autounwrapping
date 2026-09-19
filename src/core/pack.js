@@ -191,6 +191,10 @@ UVCore.define('pack', function (C) {
 
   function prepareChart(ch, opts) {
     const { uv, tris, nVerts } = ch.local;
+    if (!Number.isInteger(nVerts) || nVerts < 1 || !uv || uv.length !== nVerts * 2 || !tris || tris.length % 3 !== 0 || tris.length === 0) throw new Error('packCharts: malformed chart vertices or triangles.');
+    for (const v of uv) if (!Number.isFinite(v)) throw new Error('packCharts: UV coordinates must be finite.');
+    for (const v of tris) if (!Number.isInteger(v) || v < 0 || v >= nVerts) throw new Error('packCharts: triangle index outside chart vertices.');
+    if (!Number.isFinite(ch.area3D) || ch.area3D < 0) throw new Error('packCharts: chart area must be finite and nonnegative.');
     let signed = 0;
     for (let t = 0; t < tris.length; t += 3) {
       const a = tris[t] * 2, b = tris[t + 1] * 2, c = tris[t + 2] * 2;
@@ -198,6 +202,7 @@ UVCore.define('pack', function (C) {
     }
     const areaUV = Math.abs(signed) * 0.5;
     const s = opts.equalizeDensity && areaUV > 1e-300 && ch.area3D > 0 ? Math.sqrt(ch.area3D / areaUV) : 1;
+    if (!Number.isFinite(areaUV) || !Number.isFinite(s)) throw new Error('packCharts: chart scale exceeds the numeric range.');
     let theta = 0;
     if (opts.orientToAxis && nVerts >= 3) {
       const used = new Uint8Array(nVerts);
@@ -445,6 +450,8 @@ UVCore.define('pack', function (C) {
       method: 'bitmap', resolution: 1024, paddingTexels: 4, bilinear: true, rotations: 4,
       orientToAxis: true, equalizeDensity: true, searchMs: 0, blockAlign: false, seed: 1
     }, options || {});
+    if (!Number.isFinite(opts.resolution) || opts.resolution <= 0) throw new Error('packCharts: resolution must be a finite positive number.');
+    if (!Number.isFinite(opts.paddingTexels) || opts.paddingTexels < 0) throw new Error('packCharts: padding must be a finite nonnegative number.');
     opts.resolution = Math.max(16, opts.resolution | 0);
     opts.paddingTexels = Math.max(0, Math.round(opts.paddingTexels));
     const R = opts.resolution;
@@ -463,10 +470,11 @@ UVCore.define('pack', function (C) {
         res.workResolution = R / k;
         res.overlapTexels *= k * k;
         res.effectivePadding *= k;
+        res.requestedPadding = opts.paddingTexels;
         return res;
       }
     }
-    const empty = { packedUV: [], rects: [], transforms: [], coverage: 0, chartCoverage: 0, efficiency: 0, texelsPerUnit: 0, resolution: R, extent: { w: 0, h: 0 }, restarts: 0, overlapTexels: 0, mirroredCharts: [], scaleSearchPacks: 0 };
+    const empty = { packedUV: [], rects: [], transforms: [], coverage: 0, chartCoverage: 0, efficiency: 0, texelsPerUnit: 0, resolution: R, extent: { w: 0, h: 0 }, fits: true, effectivePadding: opts.paddingTexels, requestedPadding: opts.paddingTexels, paddingSource: 'packer', restarts: 0, overlapTexels: 0, mirroredCharts: [], scaleSearchPacks: 0 };
     if (!n) return empty;
     const prepared = charts.map(ch => prepareChart(ch, opts));
     const mirroredCharts = [];
@@ -615,6 +623,7 @@ UVCore.define('pack', function (C) {
       efficiency: extW * extH > 0 ? exactArea / (extW * extH) : 0,
       texelsPerUnit: D * R / S, resolution: R, extent: { w: extW / S, h: extH / S },
       fits: fitsR, effectivePadding: opts.paddingTexels * R / S,
+      requestedPadding: opts.paddingTexels, paddingSource: 'packer',
       restarts, overlapTexels, mirroredCharts, scaleSearchPacks: packs, method: opts.method
     };
   }
