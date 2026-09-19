@@ -581,14 +581,16 @@ UVCore.define('engine', function (C) {
 
     /* ---------------- undo ---------------- */
     /* Fingerprint geometry as well as topology: scaled/deformed meshes differ. */
-    _meshKey() {
+    _meshKey(legacy) {
       const m = this.mesh;
       let h = 0x811c9dc5;
       const cw = m.cornerWeld;
       for (let i = 0; i < cw.length; i++) { h ^= cw[i]; h = Math.imul(h, 0x01000193); }
-      const positions = new Uint8Array(m.positions.buffer, m.positions.byteOffset, m.positions.byteLength);
-      for (let i = 0; i < positions.length; i++) { h ^= positions[i]; h = Math.imul(h, 0x01000193); }
-      return m.faceCount + ':' + m.edgeCount + ':' + m.weldCount + ':' + (h >>> 0).toString(16);
+      if (!legacy) {
+        const positions = new Uint8Array(m.positions.buffer, m.positions.byteOffset, m.positions.byteLength);
+        for (let i = 0; i < positions.length; i++) { h ^= positions[i]; h = Math.imul(h, 0x01000193); }
+      }
+      return (legacy ? '' : 'g2:') + m.faceCount + ':' + m.edgeCount + ':' + m.weldCount + ':' + (h >>> 0).toString(16);
     }
 
     snapshot() {
@@ -611,37 +613,63 @@ UVCore.define('engine', function (C) {
     _restoreState(snap) {
       const m = this._requireMesh();
       const wrong = () => new Error('This snapshot belongs to a different mesh and cannot be restored.');
-      // validate everything before touching engine state
-      if (snap && snap.meshKey && snap.meshKey !== this._meshKey()) throw wrong();
-      if (!snap || snap.empty) {
-        if (snap && snap.manualCut && snap.manualCut.length !== m.edgeCount) throw wrong();
+      const invalid = () => new Error('Invalid UV snapshot: malformed chart, UV, options or seam data.');
+      const arrayLike = (a, length, valid) => a && a.length === length && Array.from(a).every(valid);
+      const flags = a => arrayLike(a, m.edgeCount, v => v === 0 || v === 1);
+      const object = value => value && typeof value === 'object' && !Array.isArray(value) && !ArrayBuffer.isView(value);
+      // Validate and rebuild every field before touching the current layout.
+      if (!object(snap)) throw invalid();
+      if (snap.meshKey && snap.meshKey !== this._meshKey() && snap.meshKey !== this._meshKey(true)) throw wrong();
+      if (snap.empty) {
+        if (snap.manualCut && !flags(snap.manualCut)) throw invalid();
         this.state = null;
-        if (snap && snap.manualCut) this.manualCut = Uint8Array.from(snap.manualCut);
+        this.lastCut = new Uint8Array(m.edgeCount);
+        if (snap.manualCut) this.manualCut = Uint8Array.from(snap.manualCut);
         return;
       }
-      if (snap.uv.length !== 6 * m.faceCount || snap.faceChart.length !== m.faceCount || snap.cut.length !== m.edgeCount || snap.manualCut.length !== m.edgeCount) throw wrong();
+      if (!arrayLike(snap.uv, 6 * m.faceCount, Number.isFinite) || !arrayLike(snap.faceChart, m.faceCount, Number.isInteger) || !flags(snap.cut) || !flags(snap.manualCut)) throw invalid();
+      if (!Array.isArray(snap.chartFaces) || !Array.isArray(snap.chartUV) || snap.chartFaces.length !== snap.chartUV.length || snap.chartFaces.length > m.faceCount) throw invalid();
+      if (snap.chartTris !== undefined && (!Array.isArray(snap.chartTris) || snap.chartTris.length !== snap.chartFaces.length)) throw invalid();
+      if (!object(snap.opts) || !Array.isArray(snap.notes) || !snap.notes.every(n => typeof n === 'string')) throw invalid();
+      const opts = merge(DEFAULTS, JSON.parse(JSON.stringify(snap.opts)));
+      if (!object(opts.packing) || !Number.isFinite(opts.packing.resolution) || opts.packing.resolution < 16 || !Number.isFinite(opts.packing.paddingTexels) || opts.packing.paddingTexels < 0) throw invalid();
+      if (snap.packing != null && (!object(snap.packing) || !Number.isFinite(snap.packing.resolution) || snap.packing.resolution < 16 || (snap.packing.effectivePadding != null && (!Number.isFinite(snap.packing.effectivePadding) || snap.packing.effectivePadding < 0)))) throw invalid();
+      const packing = snap.packing ? JSON.parse(JSON.stringify(snap.packing)) : null;
+      const uv = Float32Array.from(snap.uv);
+      if (!uv.every(Number.isFinite)) throw invalid();
       const cut = Uint8Array.from(snap.cut);
+      const seen = new Uint8Array(m.faceCount);
       const charts = snap.chartFaces.map((faces, i) => {
-        for (const f of faces) if (!(f >= 0 && f < m.faceCount)) throw wrong();
-        const local = C.buildChartLocal(m, faces, cut);
-        if (!snap.chartUV[i] || snap.chartUV[i].length !== local.uv.length) throw wrong();
-        local.uv.set(snap.chartUV[i]);
+        if (!faces || !Number.isInteger(faces.length) || faces.length < 1 || faces.length > m.faceCount) throw invalid();
+        for (const f of faces) {
+          if (!Number.isInteger(f) || f < 0 || f >= m.faceCount || seen[f] || snap.faceChart[f] !== i) throw invalid();
+          seen[f] = 1;
+        }
+        const values = snap.chartUV[i];
+        if (!values || values.length % 2 || values.length < 2 || values.length > 6 * faces.length || !Array.from(values).every(Number.isFinite)) throw invalid();
+        let local;
+        if (snap.chartTris) {
+          const tris = snap.chartTris[i], nVerts = values.length / 2;
+          if (!arrayLike(tris, 3 * faces.length, v => Number.isInteger(v) && v >= 0 && v < nVerts)) throw invalid();
+          const welds = new Int32Array(nVerts).fill(-1);
+          for (let c = 0; c < tris.length; c++) {
+            const v = tris[c], w = m.cornerWeld[3 * faces[Math.floor(c / 3)] + c % 3];
+            if (welds[v] >= 0 && welds[v] !== w) throw invalid();
+            welds[v] = w;
+          }
+          if (welds.some(w => w < 0)) throw invalid();
+          local = localFromTris(m, faces, tris, nVerts);
+        } else local = C.buildChartLocal(m, faces, cut);
+        if (values.length !== local.uv.length) throw invalid();
+        local.uv.set(values);
         return { faces: local.faces, local, init: { method: 'restored', fallbacks: [] }, opt: null, flips: C.countFlips(local) };
       });
+      if (charts.length ? seen.some(v => !v) : !snap.projection) throw invalid();
+      if (!charts.length && !Array.from(snap.faceChart).every(v => v >= 0 && v < m.faceCount)) throw invalid();
       this.manualCut = Uint8Array.from(snap.manualCut);
       this.lastCut = cut;
-      this.state = { opts: snap.opts, charts, uv: Float32Array.from(snap.uv), faceChart: Int32Array.from(snap.faceChart), cut, packing: snap.packing, notes: snap.notes.slice(), timings: { segment: 0, topology: 0, flatten: 0, optimize: 0, pack: 0, metrics: 0, total: 0 }, projection: snap.projection };
-      if (charts.length) {
-        // re-attach rects/transforms lazily: rects from the packed uv
-        for (let ci = 0; ci < charts.length; ci++) {
-          let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
-          for (const f of charts[ci].faces) for (let k = 0; k < 3; k++) {
-            const c = 3 * f + k, u = snap.uv[2 * c], v = snap.uv[2 * c + 1];
-            if (u < mnx) mnx = u; if (u > mxx) mxx = u; if (v < mny) mny = v; if (v > mxy) mxy = v;
-          }
-          charts[ci].rect = isFinite(mnx) ? { x: mnx, y: mny, w: mxx - mnx, h: mxy - mny } : null;
-        }
-      }
+      this.state = { opts, charts, uv, faceChart: Int32Array.from(snap.faceChart), cut, packing, notes: snap.notes.slice(), timings: { segment: 0, topology: 0, flatten: 0, optimize: 0, pack: 0, metrics: 0, total: 0 }, projection: !!snap.projection, imported: !!snap.imported };
+      for (const chart of charts) chart.rect = rectFromFaces(chart.faces, uv);
       this._computeSeamFlags(this.state);
     }
 

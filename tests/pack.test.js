@@ -168,3 +168,27 @@ test('viaSource round-trip', () => {
   const res = CS.packCharts(randomSet(10, 1), { resolution: 128 });
   assert.equal(res.overlapTexels, 0);
 });
+
+test('padding evidence follows final atlas scale and the coarse working resolution', () => {
+  const charts = [grid(1, 1), grid(1, 1), grid(1, 1), grid(1, 1)];
+  const reduced = C.packCharts(charts, { resolution: 16, paddingTexels: 16 });
+  assert.equal(reduced.fits, false);
+  assert.ok(reduced.effectivePadding > 0 && reduced.effectivePadding < 16);
+  assert.equal(reduced.requestedPadding, 16);
+  assert.equal(reduced.paddingSource, 'packer');
+  const coarse = C.packCharts(charts, { resolution: 2048, workResolution: 512, paddingTexels: 5 });
+  assert.equal(coarse.resolution, 2048);
+  assert.equal(coarse.requestedPadding, 5);
+  assert.equal(coarse.effectivePadding, 8);
+  assert.equal(coarse.fits, true);
+});
+
+test('malformed and non-finite packing inputs fail before raster allocation', () => {
+  const chart = grid(1, 1);
+  assert.throws(() => C.packCharts([chart], { paddingTexels: Infinity }), /padding must be/);
+  assert.throws(() => C.packCharts([chart], { resolution: NaN }), /resolution must be/);
+  chart.local.uv[0] = Infinity;
+  assert.throws(() => C.packCharts([chart]), /coordinates must be finite/);
+  chart.local.uv[0] = 0; chart.local.tris[0] = chart.local.nVerts;
+  assert.throws(() => C.packCharts([chart]), /triangle index/);
+});

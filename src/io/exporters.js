@@ -217,7 +217,9 @@
   function decodeTyped(obj) {
     const Ctor = Object.prototype.hasOwnProperty.call(TYPED, obj.$typed) && TYPED[obj.$typed];
     if (!Ctor) throw new Error('Unknown typed array in project: ' + obj.$typed);
-    if (typeof obj.b64 !== 'string' || obj.b64.length > PROJECT_MAX_BYTES || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(obj.b64)) throw new Error('Corrupt base64 in project file.');
+    if (typeof obj.b64 !== 'string' || obj.b64.length > PROJECT_MAX_BYTES || obj.b64.length % 4 || /[^A-Za-z0-9+/=]/.test(obj.b64)) throw new Error('Corrupt base64 in project file.');
+    const padding = obj.b64.indexOf('=');
+    if (padding >= 0 && !['=', '=='].includes(obj.b64.slice(padding))) throw new Error('Corrupt base64 padding in project file.');
     const bytes = base64ToBytes(obj.b64);
     if (bytes.byteLength % Ctor.BYTES_PER_ELEMENT) throw new Error('Corrupt ' + obj.$typed + ' in project file.');
     return new Ctor(bytes.buffer, 0, bytes.byteLength / Ctor.BYTES_PER_ELEMENT);

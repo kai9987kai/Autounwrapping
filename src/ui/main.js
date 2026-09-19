@@ -361,7 +361,7 @@
     const model = U.loaders.fromObject3D(mesh, ex.name, 'example');
     if (!ex.textured) model.originalUV = null;
     await setModel(model);
-    if (ex.textured) { $('view-texture').value = 'original'; state.viewport.setTextureMode('original'); toast('This sphere has a textured lat-long UV layout. Unwrap, then "Re-bake texture" to move its texture onto the new atlas.', '', 6000); }
+    if (ex.textured && state.model === model) { $('view-texture').value = 'original'; state.viewport.setTextureMode('original'); toast('This sphere has a textured lat-long UV layout. Unwrap, then "Re-bake texture" to move its texture onto the new atlas.', '', 6000); }
   }
 
   function engineProgress(p) {
@@ -533,7 +533,8 @@
       } else if (kind === 'project') {
         if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
         const snapshot = await state.client.snapshot();
-        X.downloadBlob(X.saveProject({ name: model.name, positions: model.positions, normals: model.normals, originalUV: model.originalUV, faceMaterial: model.faceMaterial, settings: state.settings, presetKey: state.presetKey, snapshot }), name + '.uvtk.json');
+        const materials = await X.captureMaterials(model.materials);
+        X.downloadBlob(X.saveProject({ materials, meshCount: model.meshCount, name: model.name, positions: model.positions, normals: model.normals, originalUV: model.originalUV, faceMaterial: model.faceMaterial, settings: state.settings, presetKey: state.presetKey, snapshot }), name + '.uvtk.json');
       }
     } catch (e) {
       console.error(e);
@@ -543,40 +544,22 @@
 
   function reportState() {
     const m = state.model;
-    return { model: m ? { name: m.name, format: m.format, faces: m.faceCount, meshes: m.meshCount } : null, meshInfo: state.meshInfo, settings: state.settings, result: state.result, metrics: state.result && state.result.metrics, history: state.compare.map(c => Object.assign({ label: c.label }, c.summary)) };
+    return { model: m ? { name: m.name, format: m.format, faces: m.faceCount, meshes: m.meshCount } : null, meshInfo: state.meshInfo, settings: state.result ? state.result.opts : state.settings, result: state.result, metrics: state.result && state.result.metrics, history: state.compare.map(c => Object.assign({ label: c.label }, c.summary)) };
   }
 
   async function loadProjectFile(file) {
     if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
+    setBusy(true, 'Reading project…');
     try {
       const p = await U.exporters.loadProject(file);
-      const model = { positions: p.positions, normals: p.normals || null, originalUV: p.originalUV || null, faceMaterial: p.faceMaterial || null, materials: [{ name: 'material', color: [0.8, 0.8, 0.8], map: null }], name: p.name || 'project', format: 'project', meshCount: 1, faceCount: p.positions.length / 9, droppedDegenerate: 0, warnings: [] };
-      if (p.settings) { state.settings = p.settings; state.presetKey = p.presetKey || 'game_hero'; syncControls(); }
-      state.model = model;
-      state.result = null; state.analysis = null; state.baked = null; state.bakeStale = false; state.visCache = null;
-      state.undo = []; state.redo = []; state.compare = [];
-      state.viewport.setModel(model);
-      state.viewport.setBakedTexture(null);
-      state.uvView.setBackgroundImage(null);
-      state.uvView.setData(null);
-      renderPanels(null);
-      U.panels.renderCompare([], restoreCompare, removeCompare);
-      $('model-chip').title = model.name + ' (project)';
-      setBusy(true, 'Restoring project…');
-      state.meshInfo = await state.client.setMesh(model.positions);
-      if (model.originalUV) await state.client.setSourceUV(model.originalUV);
-      const r = p.snapshot ? await state.client.restore(p.snapshot) : await state.client.unwrap(state.settings);
+      const materials = await U.exporters.restoreMaterials(p.materials);
+      const model = { positions: p.positions, normals: p.normals || null, originalUV: p.originalUV || null, faceMaterial: p.faceMaterial || null, materials, name: p.name || 'project', format: 'project', meshCount: p.meshCount || 1, faceCount: p.positions.length / 9, droppedDegenerate: 0, warnings: p.warnings || [] };
       setBusy(false);
-      $('model-chip').textContent = model.name + ' · ' + model.faceCount.toLocaleString() + ' tris';
-      $('status-mesh').textContent = state.meshInfo.faceCount.toLocaleString() + ' faces · ' + state.meshInfo.componentCount + ' part(s)';
-      if (r) applyResult(r, { label: 'Project restored' });
-      state.undo = []; state.redo = [];
-      updateButtons();
-      toast('Project loaded.', 'success');
+      await setModel(model, p);
     } catch (e) {
       setBusy(false);
-      clearResult();
-      toast('Could not load project: ' + e.message, 'error');
+      toast('Could not load project: ' + e.message + '. Previous work kept.', 'error');
+      setStatus('Load failed — previous work kept');
     }
   }
 
@@ -586,10 +569,12 @@
     setBusy(true, 'Grading imported UVs…');
     try {
       const m = await state.client.analyzeSource(state.settings);
-      const pseudo = { uv: state.model.originalUV, faceChart: new Int32Array(m.faces), metrics: m, charts: [], timings: { total: 0 }, packing: null, projection: true, notes: [] };
+      const sourceMesh = state.core.buildMesh(state.model.positions);
+      const islands = state.core.islandsFromUV(sourceMesh, state.model.originalUV);
+      const pseudo = { uv: state.model.originalUV, faceChart: islands.faceChart, metrics: m, charts: [], timings: { total: 0 }, packing: null, projection: true, notes: [] };
       state.analysis = pseudo;
       renderPanels(pseudo);
-      state.uvView.setData({ uv: pseudo.uv, faceChart: pseudo.faceChart, metrics: m, resolution: state.settings.packing.resolution, chartCount: 1 });
+      state.uvView.setData({ uv: pseudo.uv, faceChart: pseudo.faceChart, metrics: m, resolution: state.settings.packing.resolution, chartCount: islands.chartCount });
       state.compare.push(compareEntry(pseudo, 'Imported UVs', 'The model\'s original UV layout'));
       U.panels.renderCompare(state.compare, restoreCompare, removeCompare);
       toast('Imported UVs score ' + m.score.score + ' (' + m.chartCount + ' islands). Pinned to Compare.', 'success', 5000);
@@ -604,7 +589,7 @@
   async function pinCurrent() {
     if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
     if (!state.result) { toast('Nothing to pin yet.', 'warn'); return; }
-    const s = state.settings, e = compareEntry(state.result, '#' + (state.compare.length + 1) + ' ' + s.mode + ' ' + s.segmentation.angleDeg + '°', JSON.stringify({ mode: s.mode, parameterizer: s.parameterizer, optimizer: s.optimizer, iterations: s.iterations, angle: s.segmentation.angleDeg, packing: s.packing }));
+    const s = state.result.opts || state.settings, e = compareEntry(state.result, '#' + (state.compare.length + 1) + ' ' + s.mode + ' ' + s.segmentation.angleDeg + '°', JSON.stringify({ mode: s.mode, parameterizer: s.parameterizer, optimizer: s.optimizer, iterations: s.iterations, angle: s.segmentation.angleDeg, packing: s.packing }));
     try { e.snap = await state.client.snapshot(); e.settings = clone(s); } catch (err) { /* ignore */ }
     state.compare.push(e);
     U.panels.renderCompare(state.compare, restoreCompare, removeCompare);
@@ -666,9 +651,11 @@
     $('btn-search').addEventListener('click', runSearch);
     $('btn-undo').addEventListener('click', undo);
     $('btn-redo').addEventListener('click', redo);
-    $('btn-cancel').addEventListener('click', () => state.client.cancel());
+    $('btn-cancel').addEventListener('click', () => (state.operationClient || state.client).cancel());
     $('btn-bake').addEventListener('click', bake);
     $('btn-analyze-source').addEventListener('click', analyzeSource);
+    $('btn-adopt-source').addEventListener('click', adoptSource);
+    $('btn-transform-chart').addEventListener('click', transformSelected);
     $('btn-benchmark').addEventListener('click', benchmark);
     $('btn-pin').addEventListener('click', pinCurrent);
     $('btn-compare-clear').addEventListener('click', () => { state.compare = []; U.panels.renderCompare([], restoreCompare, removeCompare); });

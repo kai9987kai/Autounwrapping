@@ -111,6 +111,86 @@ test('CSV quoting, report stripping and UV layout drawing into a recording conte
   assert.deepEqual(calls, { moveTo: 2, lineTo: 4, fill: 2, stroke: 2 });
 });
 
+test('project validation rejects unsafe keys, non-finite geometry and mismatched arrays', async () => {
+  const positions = F.cube();
+  const valid = JSON.parse(await X.saveProject({ positions }).text());
+  assert.equal(valid.version, 2);
+  const unsafe = JSON.stringify(valid).replace('"version":2', '"version":2,"__proto__":{"polluted":true}');
+  await assert.rejects(X.loadProject(unsafe), /Unsafe key/);
+  await assert.rejects(X.loadProject(X.saveProject({ positions: new Float32Array() })), /mesh positions/);
+  const nonfinite = positions.slice(); nonfinite[0] = NaN;
+  await assert.rejects(X.loadProject(X.saveProject({ positions: nonfinite })), /non-finite mesh/);
+  await assert.rejects(X.loadProject(X.saveProject({ positions, originalUV: new Float32Array(6) })), /source UV/);
+  await assert.rejects(X.loadProject(X.saveProject({ positions, normals: new Float32Array(3) })), /normals/);
+  valid.positions.$typed = '__proto__';
+  await assert.rejects(X.loadProject(JSON.stringify(valid)), /Unknown typed/);
+  valid.positions.$typed = 'Float32Array'; valid.positions.b64 = 'A===';
+  await assert.rejects(X.loadProject(JSON.stringify(valid)), /base64/);
+  const deep = JSON.parse(await X.saveProject({ positions }).text());
+  let current = deep;
+  for (let i = 0; i < 50; i++) current = current.nested = {};
+  await assert.rejects(X.loadProject(JSON.stringify(deep)), /nested too deeply/);
+});
+
+test('v1 projects remain readable and disclose missing materials', async () => {
+  const old = JSON.parse(await X.saveProject({ positions: F.cube() }).text()); old.version = 1;
+  const back = await X.loadProject(JSON.stringify(old));
+  assert.ok(back.warnings.some(w => /no saved materials/.test(w)));
+  const neutral = await X.restoreMaterials(back.materials);
+  assert.equal(neutral.length, 1);
+  assert.equal(neutral[0].map, null);
+});
+
+test('project snapshots preserve chart membership and reject corrupted face ownership', async () => {
+  const browser = loadBrowser({ core: true, scripts: ['src/io/exporters.js'] });
+  const engine = new (browser.UVCore.build().UVEngine)();
+  const positions = F.cube(); engine.setMesh(positions); engine.unwrap({ mode: 'box' });
+  const snapshot = engine.snapshot();
+  const good = await browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions, snapshot }));
+  const restored = engine.restore(good.snapshot);
+  assert.equal(restored.metrics.faces, positions.length / 9);
+  snapshot.chartFaces[0][0] = positions.length / 9;
+  await assert.rejects(browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions, snapshot })), /membership/);
+});
+
+test('material project helpers retain colours, texture transforms and sampler settings', async () => {
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+  let drawn = null;
+  class Canvas {
+    constructor(width, height) { this.width = width; this.height = height; }
+    getContext() { return { drawImage: image => { drawn = image; } }; }
+    async convertToBlob() { return new Blob([Buffer.from(PNG, 'base64')], { type: 'image/png' }); }
+  }
+  const browser = loadBrowser({ three: true, scripts: ['src/io/exporters.js'], globals: { OffscreenCanvas: Canvas } });
+  const T = browser.THREE;
+  const texture = new T.Texture({ width: 1, height: 1 });
+  texture.flipY = false; texture.wrapS = T.RepeatWrapping; texture.wrapT = T.MirroredRepeatWrapping;
+  texture.encoding = T.sRGBEncoding; texture.offset.set(0.2, 0.3); texture.repeat.set(2, 3); texture.rotation = 0.4;
+  const materials = await browser.UVApp.exporters.captureMaterials([
+    { name: 'paint', color: [0.2, 0.4, 0.6], colorSpace: 'linear', map: texture },
+    { name: 'trim', color: [1, 0, 0], colorSpace: 'srgb', map: null }
+  ]);
+  assert.equal(drawn, texture.image);
+  assert.equal(materials[0].map.image, 'data:image/png;base64,' + PNG);
+  T.TextureLoader = class { load(url, done) { assert.equal(url, materials[0].map.image); done(new T.Texture({ width: 1, height: 1 })); } };
+  const restored = await browser.UVApp.exporters.restoreMaterials(materials);
+  assert.deepEqual(Array.from(restored[0].color), [0.2, 0.4, 0.6]);
+  assert.equal(restored[0].colorSpace, 'linear');
+  assert.equal(restored[0].map.flipY, false);
+  assert.equal(restored[0].map.wrapT, T.MirroredRepeatWrapping);
+  assert.equal(restored[0].map.encoding, T.sRGBEncoding);
+  assert.equal(restored[0].map.matrixAutoUpdate, false);
+  assert.deepEqual(Array.from(restored[0].map.matrix.elements), Array.from(texture.matrix.elements));
+  assert.equal(restored[1].map, null);
+  const faceMaterial = new Uint16Array(F.cube().length / 9).fill(1);
+  const project = await browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions: F.cube(), materials, faceMaterial }));
+  assert.equal(project.warnings.length, 0);
+  faceMaterial[0] = 2;
+  await assert.rejects(browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions: F.cube(), materials, faceMaterial })), /material index/);
+  materials[0].map.image = 'https://example.com/texture.png';
+  await assert.rejects(browser.UVApp.exporters.restoreMaterials(materials), /embedded/);
+});
+
 test('GLB export writes spec-correct glTF uvs (v-down) that the loader turns back into the same v-up layout', async () => {
   const { P, uv } = cubeUV();
   const blob = await X.exportGLB(P, uv, 'cube');

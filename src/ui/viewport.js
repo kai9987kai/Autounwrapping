@@ -89,11 +89,12 @@
     setModel(model) {
       const THREE = root.THREE;
       if (this.baked) this.baked.dispose();
+      if (this._originalMaps) { for (const tex of this._originalMaps.values()) tex.dispose(); this._originalMaps.clear(); }
       for (const m of (this.model && this.model !== model && this.model.materials) || []) if (m.map && m.map.dispose) m.map.dispose();
       this.model = model;
       this.result = null;
       this.baked = null;
-      if (this.mesh) { this.scene.remove(this.mesh); this.mesh.geometry.dispose(); if (this.mesh.material) this.mesh.material.dispose(); }
+      if (this.mesh) { this.scene.remove(this.mesh); this.mesh.geometry.dispose(); for (const mat of [].concat(this.mesh.material || [])) mat.dispose(); }
       this.highlightChart(-1);
       const F = model.positions.length / 9;
       const geo = new THREE.BufferGeometry();
@@ -170,16 +171,37 @@
         if (this.textureMode === 'checker') map = T.checker(1024, 16);
         else if (this.textureMode === 'colorgrid') map = T.colorGrid(2048);
         else if (this.textureMode === 'baked') map = this.baked;
-        else if (this.textureMode === 'original' && this.model) { const m = this.model.materials.find(x => x.map); map = m ? this.originalMap(m.map) : null; }
       }
       const old = this.mesh.material;
+      this.mesh.geometry.clearGroups();
+      if (!heat && this.textureMode === 'original' && this.model) {
+        const materials = this.model.materials.map(m => {
+          const color = new THREE.Color().fromArray(m.color || [1, 1, 1]);
+          if (m.colorSpace !== 'linear') color.convertSRGBToLinear();
+          return new THREE.MeshStandardMaterial({ color, map: m.map ? this.originalMap(m.map) : null,
+            roughness: 0.78, metalness: 0.02, side: THREE.DoubleSide, wireframe: this.wire });
+        });
+        const ids = this.model.faceMaterial, F = this.model.positions.length / 9;
+        let start = 0, current = ids ? ids[0] : 0;
+        for (let f = 1; f <= F; f++) {
+          const next = f < F ? (ids ? ids[f] : 0) : -1;
+          if (next !== current) {
+            this.mesh.geometry.addGroup(start * 3, (f - start) * 3, current < materials.length ? current : 0);
+            start = f; current = next;
+          }
+        }
+        this.mesh.material = materials;
+        for (const mat of [].concat(old || [])) mat.dispose();
+        this.requestRender();
+        return;
+      }
       const mat = new THREE.MeshStandardMaterial({
         map, vertexColors: true, roughness: 0.78, metalness: 0.02, side: THREE.DoubleSide, wireframe: this.wire,
         polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
         color: (!map && !heat && this.textureMode === 'plain') ? 0x8fb4e8 : 0xffffff
       });
       this.mesh.material = mat;
-      if (old) old.dispose();
+      for (const previous of [].concat(old || [])) previous.dispose();
       this.requestRender();
     }
 
@@ -187,14 +209,14 @@
      * (flipY = false) get a v-flip composed with their own texture transform. */
     originalMap(src) {
       if (src.flipY !== false) return src;
-      if (this._origMap && this._origMap.src === src) return this._origMap.tex;
+      if (!this._originalMaps) this._originalMaps = new Map();
+      if (this._originalMaps.has(src)) return this._originalMaps.get(src);
       const tex = src.clone();
       src.updateMatrix();
       tex.matrixAutoUpdate = false;
       tex.matrix.copy(src.matrix).multiply(new root.THREE.Matrix3().set(1, 0, 0, 0, -1, 1, 0, 0, 1));
       tex.needsUpdate = true;
-      if (this._origMap) this._origMap.tex.dispose();
-      this._origMap = { src, tex };
+      this._originalMaps.set(src, tex);
       return tex;
     }
 

@@ -191,3 +191,82 @@ test('raster coverage counts texel centres inside the layout', () => {
   near(r.coverageRaster, 0.25, 0.01, 'raster coverage');
   assert.equal(r.overlapTexels, 0);
 });
+
+test('invalid coordinates and collapsed UV faces fail closed without NaN summaries', () => {
+  const m = C.buildMesh(F.gridPatch(1, 1));
+  const goodUV = uvFrom(m, (x, y) => [0.8 * x + 0.5, 0.8 * y + 0.5]);
+  const collapsed = new Float32Array(goodUV.length).fill(0.5);
+  const badUV = Float32Array.from(goodUV); badUV[0] = NaN;
+  const cases = [collapsed, badUV, Float32Array.from(goodUV, v => v + 2)];
+  for (const uv of cases) {
+    const r = C.computeMetrics(m, uv, null, null);
+    assert.equal(r.score.valid, false);
+    assert.equal(r.bake.ready, false);
+    assert.ok(r.score.score <= 49);
+    for (const key of ['coverageExact', 'coverageRaster', 'stretchL2', 'score']) {
+      assert.ok(!Number.isNaN(key === 'score' ? r.score.score : r[key]), key);
+    }
+  }
+  const r = C.computeMetrics(m, collapsed, null, null);
+  assert.equal(r.uvDegenerate, m.faceCount);
+  assert.equal(r.geometryDegenerate, 0);
+  assert.equal(r.bijectivity.valid, false);
+  assert.ok(r.perChart.every(c => !c.valid));
+  const invalid = C.computeMetrics(m, badUV, null, null);
+  assert.equal(invalid.nonFinite, 1);
+  assert.throws(() => C.computeMetrics(m, goodUV.slice(2), null, null), /six values/);
+  assert.throws(() => C.computeMetrics(m, goodUV, new Int32Array([0]), null), /one value/);
+  assert.equal(C.logNormalScore(NaN, 0.1, 0.5), 0);
+});
+
+test('contained components with one chart label are exact overlaps, even below raster resolution', () => {
+  const a = F.gridPatch(1, 1), b = a.map((v, i) => i % 3 === 2 ? v + 2 : v);
+  const m = C.buildMesh(concat(a, b));
+  const uv = uvFrom(m, (x, y, z) => z < 1 ? [0.8 * x + 0.5, 0.8 * y + 0.5] : [1e-4 * x + 0.6, 1e-4 * y + 0.4]);
+  const r = C.computeMetrics(m, uv, new Int32Array(m.faceCount), null, { rasterRes: 16 });
+  assert.equal(r.overlapTexels, 0, 'tiny overlap intentionally misses all raster centres');
+  assert.equal(r.bijectivity.complete, true);
+  assert.equal(r.bijectivity.valid, false);
+  assert.deepEqual(Array.from(r.bijectivity.selfIntersectingCharts), [0]);
+  assert.equal(r.perChart[0].valid, false);
+});
+
+test('duplicate same-winding faces overlap, while shared triangle edges do not', () => {
+  const a = F.gridPatch(1, 1);
+  const m = C.buildMesh(concat(a, a));
+  const uv = uvFrom(m, (x, y) => [0.8 * x + 0.5, 0.8 * y + 0.5]);
+  const r = C.computeMetrics(m, uv, new Int32Array(m.faceCount), null);
+  assert.equal(r.score.valid, false);
+  assert.ok(r.overlapTexels > 0);
+  const patch = C.buildMesh(a);
+  const shared = C.computeMetrics(patch, uv.slice(0, 12), new Int32Array([0, 1]), null);
+  assert.equal(shared.bijectivity.valid, true);
+  assert.equal(shared.overlapTexels, 0);
+});
+
+test('local texel density reports variation hidden by a single chart average', () => {
+  const m = C.buildMesh(F.gridPatch(2, 1));
+  const uv = uvFrom(m, (x, y) => [0.5 + (x <= 0 ? 0.8 : 0.2) * x, 0.5 + 0.4 * y]);
+  const r = C.computeMetrics(m, uv, new Int32Array(m.faceCount), null);
+  near(r.texelDensity.chartCV, 0, 1e-8, 'chart CV');
+  near(r.texelDensity.cv, 1 / 3, 1e-6, 'face area weighted CV');
+});
+
+test('bake readiness uses effective padding and cannot certify unknown imported margins', () => {
+  const m = C.buildMesh(F.gridPatch(2, 2));
+  const uv = uvFrom(m, (x, y) => [0.8 * x + 0.5, 0.8 * y + 0.5]);
+  const chart = new Int32Array(m.faceCount);
+  const imported = C.computeMetrics(m, uv, chart, null);
+  assert.equal(imported.score.valid, true);
+  assert.equal(imported.bake.paddingKnown, false);
+  assert.equal(imported.bake.paddingTexels, null);
+  assert.equal(imported.bake.ready, false);
+  const reduced = C.computeMetrics(m, uv, chart, null, { paddingTexels: 16, effectivePaddingTexels: 1.5, paddingSource: 'packer' });
+  assert.equal(reduced.bake.maxSafeMip, 0);
+  assert.equal(reduced.bake.paddingTexels, 1.5);
+  assert.equal(reduced.bake.requestedPaddingTexels, 16);
+  assert.equal(reduced.bake.ready, false);
+  const packed = C.computeMetrics(m, uv, chart, null, { effectivePaddingTexels: 8, paddingSource: 'packer' });
+  assert.equal(packed.bake.ready, true);
+  assert.equal(packed.bake.maxSafeMip, 3);
+});

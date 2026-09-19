@@ -89,15 +89,74 @@ test('cancel() rejects with CancelError, respawns the worker and replays mesh + 
 });
 
 test('falls back to the main thread when the worker never becomes ready', async () => {
-  const { ctx, workerFactory } = setup({ neverReady: true });
+  const { ctx, workers, workerFactory } = setup({ neverReady: true });
   const client = await new ctx.UVApp.EngineClient({ workerFactory, readyTimeoutMs: 50 }).init();
   assert.equal(client.mode, 'main');
+  assert.ok(workers[0].terminated, 'the timed-out worker is terminated');
+  assert.equal(workers[0].onmessage, null, 'late ready messages cannot resurrect it');
   const stages = new Set();
   client.onProgress(p => stages.add(p.stage));
   await client.setMesh(F.cube());
   const r = await client.unwrap({});
   assert.ok(r.metrics.bijectivity.valid);
   assert.ok(stages.has('metrics'));
+  client.dispose();
+});
+
+test('rejected source UV updates do not replace accepted restart state', async () => {
+  const { ctx, workerFactory } = setup();
+  const client = await new ctx.UVApp.EngineClient({ workerFactory }).init();
+  const mesh = F.cube();
+  await client.setMesh(mesh);
+  const original = new Float32Array(mesh.length / 9 * 6);
+  for (let f = 0; f < original.length / 6; f++) original.set([0, 0, 1, 0, 0, 1], 6 * f);
+  await client.setSourceUV(original);
+  await assert.rejects(client.setSourceUV(new Float32Array(3)), /setSourceUV/);
+  const pending = assert.rejects(client.unwrap({ mode: 'box' }), e => e.name === 'CancelError');
+  await client.cancel(); await pending;
+  const source = await client.analyzeSource({});
+  assert.equal(source.faces, mesh.length / 9);
+  client.dispose();
+});
+
+test('restored manual seams survive an immediate worker cancellation', async () => {
+  const { ctx, workerFactory } = setup();
+  const client = await new ctx.UVApp.EngineClient({ workerFactory }).init();
+  await client.setMesh(F.cube());
+  await client.seamsFromAngle(30);
+  const snapshot = await client.snapshot();
+  const expected = Array.from(snapshot.manualCut);
+  assert.ok(expected.some(Boolean));
+  await client.clearSeams();
+  await client.restore(snapshot);
+  const pending = assert.rejects(client.unwrap({ mode: 'box' }), e => e.name === 'CancelError');
+  await client.cancel(); await pending;
+  assert.deepEqual(Array.from(await client.getManualCut()), expected);
+  client.dispose();
+});
+
+test('dispose settles active and queued calls and rejects future calls', async () => {
+  const { ctx, workers, workerFactory } = setup();
+  const client = await new ctx.UVApp.EngineClient({ workerFactory }).init();
+  await client.setMesh(F.cube());
+  const active = assert.rejects(client.unwrap({}), e => e.name === 'CancelError');
+  const queued = assert.rejects(client.meshInfo(), e => e.name === 'CancelError');
+  client.dispose();
+  await active; await queued;
+  assert.ok(workers[0].terminated);
+  await assert.rejects(client.meshInfo(), e => e.name === 'CancelError');
+  await assert.rejects(client.callTransfer('setMesh', [F.cube()], []), e => e.name === 'CancelError');
+  assert.equal(client.active, null);
+});
+
+test('dispose during initialization terminates the starting worker without fallback', async () => {
+  const { ctx, workers, workerFactory } = setup({ neverReady: true });
+  const client = new ctx.UVApp.EngineClient({ workerFactory });
+  const starting = assert.rejects(client.init(), e => e.name === 'CancelError');
+  client.dispose();
+  await starting;
+  assert.ok(workers[0].terminated);
+  assert.equal(client.engine, null);
 });
 
 test('main mode: errors propagate and cancel rejects queued work', async () => {

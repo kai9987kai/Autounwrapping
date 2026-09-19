@@ -5,6 +5,30 @@ const { loadCore } = require('./load-core');
 const F = require('./fixtures');
 const C = loadCore();
 
+test('mesh preflight detects duplicates, winding defects, collapse and thin faces', () => {
+  const tri = [0, 0, 0, 1, 0, 0, 0, 1, 0];
+  const duplicate = C.buildMesh(new Float32Array([...tri, ...tri])).diagnostics;
+  assert.equal(duplicate.duplicateFaces, 1);
+  assert.equal(duplicate.inconsistentEdges, 3);
+  assert.equal(duplicate.healthy, false);
+  assert.equal(C.buildMesh(new Float32Array([0,0,0, 1,0,0, 2,0,0])).diagnostics.degenerateFaces, 1);
+  assert.equal(C.buildMesh(new Float32Array([0,0,0, 1,0,0, 0,0.0001,0])).diagnostics.sliverFaces, 1);
+  const open = C.buildMesh(new Float32Array(tri)).diagnostics;
+  assert.equal(open.healthy, true);
+  assert.equal(open.closed, false);
+  assert.equal(open.boundaryEdges, 3);
+});
+
+test('mesh rejects malformed coordinates and tolerances before topology work', () => {
+  assert.throws(() => C.buildMesh([0, 1]), /complete triangles/);
+  for (const value of [NaN, Infinity, -Infinity]) {
+    const p = new Float32Array(9); p[0] = value;
+    assert.throws(() => C.buildMesh(p), /finite/);
+  }
+  for (const weldTolerance of [0, -1, Infinity, NaN]) assert.throws(() => C.buildMesh(F.cube(), { weldTolerance }), /tolerance/);
+  assert.equal(C.buildMesh(F.cube()).diagnostics.healthy, true);
+});
+
 test('cube welds to 8 vertices, 18 edges, 12 faces, chi = 2, closed, manifold', () => {
   const m = C.buildMesh(F.cube());
   assert.equal(m.faceCount, 12);

@@ -105,6 +105,123 @@ test('imported UVs: analyse and convert their islands into seams', () => {
   assert.equal(E2.unwrap({ mode: 'whole' }).metrics.chartCount, 6);
 });
 
+test('imported cylinder UVs preserve a seam inside one connected island, then repack and relax', () => {
+  const E = new C.UVEngine(), segments = 12, rows = 3;
+  E.setMesh(F.cylinderOpen(segments, rows));
+  const source = [];
+  for (let j = 0; j < rows; j++) for (let i = 0; i < segments; i++) {
+    const a = [1 - i / segments, j / rows], b = [1 - i / segments, (j + 1) / rows];
+    const c = [1 - (i + 1) / segments, (j + 1) / rows], d = [1 - (i + 1) / segments, j / rows];
+    source.push(...a, ...b, ...c, ...a, ...c, ...d);
+  }
+  assert.equal(E.setSourceUV(source), 1);
+  assert.equal(E.seamsFromSourceUV().added, rows, 'an internal slit is a seam even when faces remain one island');
+  const adopted = E.adoptSource({ packing: { resolution: 256 } });
+  assert.deepEqual(adopted.uv, Float32Array.from(source), 'adopting never moves an imported corner');
+  assert.equal(adopted.imported, true);
+  assert.equal(adopted.charts.length, 1);
+  assert.equal(adopted.charts[0].nVerts, (segments + 1) * (rows + 1));
+  assert.equal(adopted.charts[0].isDisk, true);
+  assert.equal(adopted.metrics.bake.paddingKnown, false);
+  const snap = E.snapshot();
+  const packed = E.repack({});
+  assert.equal(packed.charts.length, 1);
+  assert.equal(packed.metrics.bijectivity.valid, true);
+  assert.ok(inUnit(packed.uv));
+  assert.equal(packed.metrics.bake.paddingTexels, packed.packing.effectivePadding);
+  assert.deepEqual(E.restore(snap).uv, adopted.uv);
+  assert.deepEqual(E.snapshot().chartTris, snap.chartTris);
+  assert.equal(E.relax({ iterations: 3 }).metrics.flipped, 0);
+});
+
+test('source validation is transactional and imported degenerate corners retain distinct UVs', () => {
+  const E = new C.UVEngine();
+  E.setMesh(new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0]));
+  const original = new Float32Array([0, 0, 1, 0, 0.8, 1]);
+  E.setSourceUV(original);
+  for (const bad of [NaN, Infinity, -Infinity, 1e100]) {
+    const values = Array.from(original); values[0] = bad;
+    assert.throws(() => E.setSourceUV(values), /finite/);
+    assert.deepEqual(E.sourceUV, original);
+  }
+  const adopted = E.adoptSource();
+  assert.equal(adopted.charts[0].nVerts, 3, 'UV splits survive coincident geometric corners');
+  assert.deepEqual(adopted.uv, original);
+  const snapshot = E.snapshot();
+  assert.deepEqual(E.restore(snapshot).uv, original);
+  assert.deepEqual(E.snapshot().chartUV, snapshot.chartUV);
+});
+
+test('adoption cancellation leaves existing UVs and chart state untouched', () => {
+  const { E, r } = unwrapped(F.cube(), { mode: 'box' });
+  E.setSourceUV(r.uv);
+  const before = E.snapshot();
+  assert.equal(E.adoptSource({}, null, () => true).cancelled, true);
+  assert.deepEqual(E.snapshot(), before);
+});
+
+test('selected chart transforms preserve shape edits in undo and report invalid atlas placement', () => {
+  const E = new C.UVEngine();
+  E.setMesh(F.gridPatch(1, 1));
+  E.setSourceUV([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]);
+  E.adoptSource({ packing: { resolution: 128 } });
+  const original = E.snapshot();
+  const transformed = E.transformChart(0, { rotateDegrees: 90, scale: 0.5, offsetU: 0.1, offsetV: -0.1 });
+  assert.ok(Math.abs(transformed.uv[0] - 0.85) < 1e-6);
+  assert.ok(Math.abs(transformed.uv[1] - 0.15) < 1e-6);
+  assert.equal(transformed.metrics.bijectivity.valid, true);
+  assert.equal(transformed.metrics.bake.paddingKnown, false);
+  const edited = E.snapshot();
+  E.restore(original);
+  E.restore(edited);
+  assert.deepEqual(E.snapshot().chartUV, edited.chartUV);
+  assert.deepEqual(E.snapshot().uv, edited.uv);
+  for (const params of [{ scale: 0 }, { scale: -1 }, { rotateDegrees: Infinity }, { offsetU: NaN }, { scale: 1e100 }]) {
+    assert.throws(() => E.transformChart(0, params), /finite|positive/);
+    assert.deepEqual(E.snapshot(), edited, 'failed transforms are transactional');
+  }
+  assert.throws(() => E.transformChart(0.1, {}), /valid chart/);
+  const outside = E.transformChart(0, { offsetU: 2 });
+  assert.equal(outside.metrics.score.valid, false, 'out-of-tile coordinates cannot pass validation');
+  assert.equal(E.repack({}).metrics.bijectivity.valid, true);
+});
+
+test('chart transforms only move the selected island and detect newly introduced overlap', () => {
+  const { E } = unwrapped(F.cube(), { mode: 'box', packing: { resolution: 128 } });
+  const before = E.snapshot(), first = E.state.charts[0].rect, second = E.state.charts[1].rect;
+  const r = E.transformChart(0, { offsetU: second.x - first.x, offsetV: second.y - first.y });
+  assert.equal(r.metrics.bijectivity.valid, false);
+  for (let f = 0; f < E.mesh.faceCount; f++) if (r.faceChart[f] !== 0) {
+    assert.deepEqual(r.uv.slice(6 * f, 6 * f + 6), before.uv.slice(6 * f, 6 * f + 6));
+  }
+});
+
+test('snapshots reject changed geometry and malformed data without changing current state', () => {
+  const { E } = unwrapped(F.gridPatch(2, 2), { mode: 'whole', packing: { resolution: 128 } });
+  const before = E.snapshot();
+  const scaled = new C.UVEngine();
+  scaled.setMesh(F.gridPatch(2, 2, null, 2, 1));
+  assert.throws(() => scaled.restore(before), /different mesh/);
+  for (const corrupt of [
+    s => { s.uv = null; },
+    s => { s.uv[0] = NaN; },
+    s => { s.faceChart[0] = -1; },
+    s => { s.chartFaces[0][1] = s.chartFaces[0][0]; },
+    s => { s.chartUV[0][0] = Infinity; },
+    s => { s.chartTris[0][0] = -1; },
+    s => { s.opts.packing = null; },
+    s => { s.manualCut[0] = 2; }
+  ]) {
+    const snap = structuredClone(before); corrupt(snap);
+    assert.throws(() => E.restore(snap), /Invalid UV snapshot/);
+    assert.deepEqual(E.snapshot(), before);
+  }
+  const legacy = structuredClone(before);
+  legacy.meshKey = E._meshKey(true);
+  delete legacy.chartTris;
+  assert.deepEqual(E.restore(legacy).uv, before.uv, 'legacy topology fingerprints and inferred local topology remain readable');
+});
+
 test('optimizeSearch keeps the best trial; cancel returns { cancelled }', () => {
   const E = new C.UVEngine();
   E.setMesh(F.uvSphere(16, 10));
@@ -195,5 +312,9 @@ test('review fixes: charts that cannot fit are scaled down without stacking', ()
   const r = E.unwrap({ segmentation: { angleDeg: 20, maxFaces: 20 }, iterations: 0, optimizer: 'none', packing: { resolution: 64, paddingTexels: 6 } });
   assert.equal(r.metrics.bijectivity.valid, true, 'no stacked charts');
   assert.equal(r.packing.fits, false);
+  assert.ok(r.packing.effectivePadding < r.opts.packing.paddingTexels);
+  assert.equal(r.metrics.bake.paddingTexels, r.packing.effectivePadding);
+  assert.equal(E.metrics().bake.paddingTexels, r.packing.effectivePadding);
+  assert.equal(E.restore(E.snapshot()).metrics.bake.paddingTexels, r.packing.effectivePadding);
   assert.ok(r.notes.some(n => /did not fit/.test(n)));
 });
