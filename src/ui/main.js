@@ -364,10 +364,54 @@
     if (ex.textured) { $('view-texture').value = 'original'; state.viewport.setTextureMode('original'); toast('This sphere has a textured lat-long UV layout. Unwrap, then "Re-bake texture" to move its texture onto the new atlas.', '', 6000); }
   }
 
-  async function setModel(model) {
+  function engineProgress(p) {
+    const label = STAGES[p.stage] || String(p.stage);
+    setStatus(label + (p.total > 1 ? ' (' + p.done + '/' + p.total + ')' : '') + '…');
+    setProgress(p.total ? p.done / p.total : 0, !p.total || p.total <= 1);
+  }
+
+  function showMeshHealth() {
+    const mi = state.meshInfo, h = mi && mi.diagnostics, list = $('mesh-health-issues');
+    list.replaceChildren();
+    $('mesh-health-status').textContent = h ? (h.healthy ? 'clear' : 'inspect') : 'unknown';
+    $('mesh-health-summary').textContent = mi ? mi.faceCount.toLocaleString() + ' triangles · ' + mi.componentCount + ' parts · ' + mi.boundaryEdgeCount + ' boundary edges. Open surfaces are supported.' : 'Load a mesh for a topology preflight.';
+    for (const issue of h ? h.issues : []) {
+      const li = document.createElement('li'), detail = document.createElement('small');
+      li.className = issue.severity;
+      li.textContent = issue.count + ' ' + issue.message.toLowerCase();
+      detail.textContent = issue.action;
+      li.appendChild(detail); list.appendChild(li);
+    }
+    if (state.model && state.model.droppedDegenerate) {
+      const li = document.createElement('li');
+      li.textContent = state.model.droppedDegenerate + ' degenerate triangles removed during import.';
+      list.appendChild(li);
+    }
+  }
+
+  // A failed candidate must never replace the live engine or its undo history.
+  async function setModel(model, project) {
     if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
+    let candidate = null, committed = false;
+    setBusy(true, project ? 'Restoring project…' : 'Preparing mesh…');
+    try {
+      candidate = new U.EngineClient();
+      state.operationClient = candidate;
+      await candidate.init();
+      candidate.onProgress(engineProgress);
+      const meshInfo = await candidate.setMesh(model.positions);
+      if (model.originalUV) await candidate.setSourceUV(model.originalUV);
+      const settings = project && project.settings ? project.settings : state.settings;
+      const result = project && project.snapshot ? await candidate.restore(project.snapshot) : await candidate.unwrap(settings);
+      if (result && result.cancelled) throw new Error('Load cancelled.');
+      const previous = state.client;
+      state.client = candidate;
+      state.meshInfo = meshInfo;
+      committed = true;
+      if (previous) previous.dispose();
+      if (project && project.settings) { state.settings = clone(project.settings); state.presetKey = project.presetKey || 'game_hero'; syncControls(); }
     state.model = model;
-    state.result = null; state.baked = null; state.bakeStale = false; state.visCache = null;
+    state.result = null; state.analysis = null; state.selected = -1; state.baked = null; state.bakeStale = false; state.visCache = null;
     state.undo = []; state.redo = [];
     state.viewport.setModel(model);
     state.viewport.setBakedTexture(null);
@@ -381,38 +425,41 @@
     $('model-chip').textContent = model.name + ' · ' + model.faceCount.toLocaleString() + ' tris';
     $('model-chip').title = model.name + ' (' + model.format + ', ' + model.meshCount + ' mesh' + (model.meshCount === 1 ? '' : 'es') + ')';
     for (const w of model.warnings || []) U.panels.log(w);
-    setBusy(true, 'Preparing mesh…');
-    try {
-      state.meshInfo = await state.client.setMesh(model.positions);
-      if (model.originalUV) await state.client.setSourceUV(model.originalUV);
       const mi = state.meshInfo;
       $('status-mesh').textContent = mi.faceCount.toLocaleString() + ' faces · ' + mi.componentCount + ' part' + (mi.componentCount === 1 ? '' : 's') + (mi.boundaryEdgeCount ? ' · open' : ' · closed') + (mi.nonManifoldEdgeCount ? ' · ' + mi.nonManifoldEdgeCount + ' non-manifold edges' : '');
       U.panels.log('Loaded ' + model.name + ': ' + mi.faceCount + ' faces, ' + mi.weldCount + ' vertices, χ = ' + mi.eulerCharacteristic);
+      showMeshHealth();
+      $('status-engine').textContent = 'engine: ' + state.client.mode;
+      if (result) applyResult(result, { label: project ? 'Project restored' : 'Unwrap' });
+      else setStatus('Project restored — no UV result saved');
+      state.undo = []; state.redo = [];
     } catch (e) {
-      toast('Could not prepare mesh: ' + e.message, 'error');
+      toast('Could not load model: ' + e.message + '. Previous work kept.', 'error');
+      setStatus('Load failed — previous work kept');
+    } finally {
+      if (candidate && !committed) candidate.dispose();
+      state.operationClient = null;
       setBusy(false);
-      return;
     }
-    setBusy(false);
-    await runUnwrap();
-    state.undo = [];
-    updateButtons();
   }
 
   async function openFiles(files) {
+    if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
     const list = Array.from(files || []);
     if (!list.length) return;
     if (list.length === 1 && /\.(uvtk|json)$/i.test(list[0].name) && !/\.gltf$/i.test(list[0].name)) {
-      try { const text = await list[0].text(); if (/"uvtoolkit-project"/.test(text.slice(0, 400))) return loadProjectFile(list[0]); } catch (e) { /* fall through */ }
+      return loadProjectFile(list[0]);
     }
-    setStatus('Reading ' + list.map(f => f.name).join(', ') + '…');
+    setBusy(true, 'Reading ' + list.map(f => f.name).join(', ') + '…');
     try {
       const model = await U.loaders.loadFiles(list, { maxFaces: 1500000 });
+      setBusy(false);
       await setModel(model);
     } catch (e) {
       console.error(e);
       toast(e.message || String(e), 'error');
       setStatus('Load failed');
+      setBusy(false);
     }
   }
 
