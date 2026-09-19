@@ -28,7 +28,7 @@ function setup(opts = {}) {
       setTimeout(() => { if (!w.terminated && sandbox.onmessage) sandbox.onmessage({ data: copy }); }, 0);
     };
     w.terminate = () => { w.terminated = true; };
-    if (!opts.neverReady) setTimeout(() => vm.runInContext(source, context), 0);
+    if (!opts.neverReady && !(opts.failRestart && workers.length)) setTimeout(() => vm.runInContext(source, context), 0);
     workers.push(w);
     return w;
   };
@@ -157,6 +157,35 @@ test('dispose during initialization terminates the starting worker without fallb
   await starting;
   assert.ok(workers[0].terminated);
   assert.equal(client.engine, null);
+});
+
+test('worker restart can fall back to main mode with the accepted mesh and seams', async () => {
+  const { ctx, workers, workerFactory } = setup({ failRestart: true });
+  const client = await new ctx.UVApp.EngineClient({ workerFactory, readyTimeoutMs: 100 }).init();
+  const options = { weldTolerance: 0.00001 };
+  const before = await client.setMesh(F.cube(), options);
+  await client.seamsFromAngle(30);
+  const expected = Array.from(await client.getManualCut());
+  options.weldTolerance = 10; // caller-owned settings cannot alter replay state
+  const pending = assert.rejects(client.unwrap({}), e => e.name === 'CancelError');
+  await client.cancel(); await pending;
+  assert.equal(client.mode, 'main');
+  assert.ok(workers.every(w => w.terminated));
+  assert.equal((await client.meshInfo()).weldTolerance, before.weldTolerance);
+  assert.deepEqual(Array.from(await client.getManualCut()), expected);
+  client.dispose();
+});
+
+test('transferred mesh buffers remain available for cancellation recovery', async () => {
+  const { ctx, workerFactory } = setup();
+  const client = await new ctx.UVApp.EngineClient({ workerFactory }).init();
+  const positions = F.cube(), count = positions.length / 9;
+  await client.callTransfer('setMesh', [positions], [positions.buffer]);
+  assert.equal(positions.byteLength, 0, 'caller buffer transferred');
+  const pending = assert.rejects(client.unwrap({}), e => e.name === 'CancelError');
+  await client.cancel(); await pending;
+  assert.equal((await client.meshInfo()).faceCount, count);
+  client.dispose();
 });
 
 test('main mode: errors propagate and cancel rejects queued work', async () => {

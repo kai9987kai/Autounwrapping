@@ -62,9 +62,9 @@
       card('Stretch L2', num(m.stretchL2, 4), g.sd, 'Sander et al. 2001 geometric stretch. 1.0 is ideal.'),
       card('Angle error', num(m.angleMeanDeg, 2) + '°', g.angle, 'Area-weighted mean corner angle distortion.'),
       card('Flipped', m.flipped, m.flipped ? 'bad' : 'good', 'Triangles mirrored in UV space. Must be 0.'),
-      card('Overlaps', m.bijectivity.valid ? 0 : (m.bijectivity.overlappingPairs.length + m.bijectivity.selfIntersectingCharts.length), m.bijectivity.valid ? 'good' : 'bad', 'Exact chart boundary intersection test.'),
+      card('Overlaps', m.bijectivity.complete === false ? 'unchecked' : (m.bijectivity.overlappingPairs.length + m.bijectivity.selfIntersectingCharts.length || (m.overlapTexels ? 'detected' : 0)), m.bijectivity.valid ? 'good' : 'bad', 'Boundary intersection, containment and raster overlap checks. A comparison budget limits very complex layouts.'),
       card('Texel density', Math.round(td.pxPerUnit) + '<small> px/u</small>', g.td, 'Mean texels per model unit at ' + td.resolution + 'px. CV ' + pct(td.cv)),
-      card('Density CV', pct(td.cv), g.td, 'Variation of texel density across charts. 0% = perfectly even.'),
+      card('Density CV', pct(td.cv), g.td, 'Area-weighted variation across triangles, including variation within each island. 0% = perfectly even.'),
       card('Texture use', pct(m.efficiency.textureEff), g.waste, 'Packing efficiency × stretch efficiency: how much of the texture carries useful, undistorted detail.'),
       card('Equiv. res.', Math.round(m.efficiency.equivalentResolution) + 'px', g.waste, 'The resolution a perfect, fully used atlas would need to match this one.'),
       card('Seams', num(m.seamLength3D, 2), g.seams, 'Total 3D seam length. Normalised: ' + num(m.seamNorm, 2)),
@@ -86,10 +86,11 @@
       [m.flipped === 0 ? 'pass' : 'fail', 'No flipped triangles', m.flipped],
       [m.bijectivity.valid ? 'pass' : 'fail', 'No overlapping charts', m.bijectivity.valid ? '0' : 'overlap'],
       [m.outOfRange === 0 ? 'pass' : 'fail', 'All UVs inside 0–1', m.outOfRange],
-      [r.projection ? 'warn' : (b.maxSafeMip >= target ? 'pass' : 'warn'), 'Padding safe to mip ' + target, r.projection ? 'n/a' : 'mip ' + b.maxSafeMip],
+      [b.paddingKnown && b.maxSafeMip >= target ? 'pass' : 'warn', 'Estimated padding for mip ' + target, !b.paddingKnown ? 'unknown — repack' : b.paddingTexels.toFixed(1) + ' px · mip ' + b.maxSafeMip],
       [m.texelDensity.cv <= 0.1 ? 'pass' : m.texelDensity.cv <= 0.25 ? 'warn' : 'fail', 'Even texel density', pct(m.texelDensity.cv)],
       [b.subTexelCharts === 0 ? 'pass' : 'warn', 'No sub-texel charts', b.subTexelCharts],
-      [m.degenerate === 0 ? 'pass' : 'warn', 'No collapsed triangles', m.degenerate]
+      [m.degenerate === 0 ? 'pass' : 'fail', 'No collapsed triangles', m.degenerate],
+      [!m.nonFinite ? 'pass' : 'fail', 'Finite UV coordinates', m.nonFinite || 0]
     ];
     ul.innerHTML = items.map(([cls, label, val]) => '<li class="' + cls + '"><span>' + esc(label) + '</span><em>' + esc(val) + '</em></li>').join('');
   }

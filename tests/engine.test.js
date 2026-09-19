@@ -88,6 +88,9 @@ test('manual seams split charts; seamsFromAngle marks the cube edges; clearSeams
   assert.equal(E.getManualCut().reduce((s, x) => s + x, 0), 0);
   E.setMesh(F.cube());
   assert.equal(E.seamsFromAngle(60), 12);
+  const seams = E.getManualCut();
+  assert.throws(() => E.setCut([1]), /expected/);
+  assert.deepEqual(E.getManualCut(), seams, 'a malformed seam update must not erase artist seams');
 });
 
 test('imported UVs: analyse and convert their islands into seams', () => {
@@ -152,6 +155,40 @@ test('source validation is transactional and imported degenerate corners retain 
   assert.deepEqual(E.snapshot().chartUV, snapshot.chartUV);
 });
 
+test('degenerate and sliver imported geometry stays diagnosable through editing', () => {
+  for (const height of [0, 1e-12]) {
+    const E = new C.UVEngine();
+    E.setMesh([0, 0, 0, 1, 0, 0, 1, height, 0]);
+    E.setSourceUV([0, 0, 1, 0, 0.8, 1]);
+    const analysis = E.analyzeSource({ packing: { resolution: 64 } });
+    assert.equal(analysis.score.valid, false);
+    for (const op of ['adoptSource', 'repack', 'relax']) {
+      const result = E[op]({ packing: { resolution: 64 }, iterations: 2 });
+      assert.equal(result.metrics.score.valid, false, op + ' must retain the invalid-geometry diagnosis');
+      assert.ok(result.uv.every(Number.isFinite));
+    }
+  }
+});
+
+test('adoption preserves discontinuities smaller than the island analysis tolerance', () => {
+  const E = new C.UVEngine();
+  E.setMesh(F.gridPatch(1, 1));
+  const source = new Float32Array([0, 0, 1, 0, 1, 1, 1e-7, 0, 1, 1, 0, 1]);
+  E.setSourceUV(source);
+  const adopted = E.adoptSource({ packing: { resolution: 64 } });
+  assert.equal(adopted.charts[0].nVerts, 6, 'exact corner discontinuities are kept even inside an analysis island');
+  const local = E.state.charts[0].local;
+  for (let c = 0; c < local.tris.length; c++) {
+    assert.equal(local.uv[2 * local.tris[c]], source[2 * c]);
+    assert.equal(local.uv[2 * local.tris[c] + 1], source[2 * c + 1]);
+  }
+  const snapshot = E.snapshot();
+  E.repack({});
+  E.restore(snapshot);
+  assert.deepEqual(E.snapshot().chartUV, snapshot.chartUV);
+  assert.deepEqual(E.snapshot().chartTris, snapshot.chartTris);
+});
+
 test('adoption cancellation leaves existing UVs and chart state untouched', () => {
   const { E, r } = unwrapped(F.cube(), { mode: 'box' });
   E.setSourceUV(r.uv);
@@ -194,6 +231,19 @@ test('chart transforms only move the selected island and detect newly introduced
   for (let f = 0; f < E.mesh.faceCount; f++) if (r.faceChart[f] !== 0) {
     assert.deepEqual(r.uv.slice(6 * f, 6 * f + 6), before.uv.slice(6 * f, 6 * f + 6));
   }
+});
+
+test('repeated chart scale edits persist through repacking unless density equalization is requested', () => {
+  const { E } = unwrapped(F.cube(), { mode: 'box', packing: { resolution: 128 } });
+  E.transformChart(0, { scale: 0.5 });
+  E.transformChart(0, { scale: 0.5 });
+  for (let i = 0; i < 2; i++) {
+    const packed = E.repack({ packing: { equalizeDensity: false } });
+    const ratio = packed.metrics.perChart[0].areaUV / packed.metrics.perChart[1].areaUV;
+    assert.ok(Math.abs(ratio - 1 / 16) < 1e-5, 'relative chart area persists: ' + ratio);
+  }
+  const equalized = E.repack({ packing: { equalizeDensity: true } });
+  assert.ok(Math.abs(equalized.metrics.perChart[0].areaUV / equalized.metrics.perChart[1].areaUV - 1) < 1e-5);
 });
 
 test('snapshots reject changed geometry and malformed data without changing current state', () => {

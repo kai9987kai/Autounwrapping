@@ -26,10 +26,17 @@
     emit(ev, p) { for (const fn of this.listeners[ev] || []) fn(p); }
 
     resize() {
+      const oldW = this.w, oldH = this.h;
       const dpr = Math.min(root.devicePixelRatio || 1, 2);
       const r = this.canvas.parentElement.getBoundingClientRect();
       this.dpr = dpr; this.w = Math.max(1, r.width); this.h = Math.max(1, r.height);
       this.canvas.width = Math.round(this.w * dpr); this.canvas.height = Math.round(this.h * dpr);
+      if (oldW > 0 && oldH > 0 && this.view) {
+        const k = Math.min(this.w, this.h) / Math.min(oldW, oldH);
+        this.view.s *= k;
+        this.view.ox = this.w / 2 + (this.view.ox - oldW / 2) * k;
+        this.view.oy = this.h / 2 + (this.view.oy - oldH / 2) * k;
+      }
     }
 
     resetView() {

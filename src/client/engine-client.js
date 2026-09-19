@@ -19,6 +19,12 @@
   const MUTATES_SEAMS = ['toggleSeamEdge', 'setSeamEdges', 'seamsFromAngle', 'clearSeams', 'seamsFromSourceUV', 'restore', 'adoptSource'];
 
   function cancelError() { const e = new Error('Operation cancelled'); e.name = 'CancelError'; return e; }
+  function copyReplay(value) {
+    if (ArrayBuffer.isView(value)) return value.slice();
+    if (Array.isArray(value)) return value.map(copyReplay);
+    if (value && typeof value === 'object') { const out = {}; for (const key of Object.keys(value)) out[key] = copyReplay(value[key]); return out; }
+    return value;
+  }
 
   class EngineClient {
     constructor(options) {
@@ -121,8 +127,8 @@
 
     record(op, args) {
       if (STATEFUL.indexOf(op) >= 0) {
-        if (op === 'setMesh') { this.replay.clear(); this.replay.set('setMesh', args.map(a => ArrayBuffer.isView(a) ? a.slice() : a)); }
-        else this.replay.set(op, args.map(a => ArrayBuffer.isView(a) ? a.slice() : a));
+        if (op === 'setMesh') this.replay.clear();
+        this.replay.set(op, args.map(copyReplay));
       }
     }
 
@@ -131,7 +137,7 @@
       const job = this.active = this.queue.shift();
       // Retain a candidate before transferable buffers are detached, but only
       // commit it once the engine confirms that the operation succeeded.
-      const candidate = !job.noRecord && STATEFUL.indexOf(job.op) >= 0 ? job.args.map(a => ArrayBuffer.isView(a) ? a.slice() : a) : null;
+      const candidate = !job.noRecord && STATEFUL.indexOf(job.op) >= 0 ? job.args.map(copyReplay) : null;
       const done = (fn, v) => {
         if (this.active !== job) return;
         this.active = null;

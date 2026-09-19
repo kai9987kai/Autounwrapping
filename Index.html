@@ -171,6 +171,7 @@
         <div class="row">
           <button id="btn-analyze-source" class="small" disabled>Grade imported UVs</button>
           <button id="btn-adopt-source" class="small" disabled title="Keep the existing UV coordinates and islands; then edit, relax or repack them">Use imported layout</button>
+          <button id="btn-current-result" class="small ghost" hidden>Return to current result</button>
           <button id="btn-benchmark" class="small ghost">Benchmark</button>
         </div>
       </details>
@@ -284,7 +285,7 @@
           <label>Move V<input type="number" id="chart-v" value="0" step="0.01" /></label>
         </div>
         <button id="btn-transform-chart" class="small" disabled>Apply chart edit</button>
-        <p class="hint">Rotate and scale around the island centre. Edits support undo; check overlaps and repack to restore padding.</p>
+        <p class="hint">Edits support undo. Repack restores padding and chooses new positions. Turn off “Equalise texel density” to preserve relative island sizes when repacking.</p>
       </section>
 
       <details class="card" open>

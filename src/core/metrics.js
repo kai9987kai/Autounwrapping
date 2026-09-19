@@ -187,7 +187,7 @@ UVCore.define('metrics', function (C) {
         if (ch >= 0) cInvalid[ch]++;
         continue;
       }
-      for (let k = 0; k < 6; k++) { const v = uv[u + k]; if (!(v >= -UV_EPS && v <= 1 + UV_EPS)) { outOfRange++; break; } }
+      for (let k = 0; k < 6; k++) { const v = uv[u + k]; if (!(v >= -UV_EPS && v <= 1 + UV_EPS)) { outOfRange++; if (ch >= 0) cInvalid[ch]++; break; } }
       const A3 = mesh.faceAreas[f];
       const Auv = 0.5 * ((uv[u + 2] - uv[u]) * (uv[u + 5] - uv[u + 1]) - (uv[u + 4] - uv[u]) * (uv[u + 3] - uv[u + 1]));
       if (!Number.isFinite(Auv)) { nonFinite++; degenerate++; faceFlag[f] = 2; if (ch >= 0) cInvalid[ch]++; continue; }
@@ -375,7 +375,7 @@ UVCore.define('metrics', function (C) {
         flips: cFlips[c], density: densMean > 0 ? density[c] / densMean : 0,
         pxPerUnit: density[c] * resolution,
         seamShare: seamLength3D > 0 ? chartSeam[c] / seamLength3D : 0,
-        valid: cFlips[c] === 0 && cInvalid[c] === 0 && !bij.badCharts.has(c)
+        valid: cFaces[c] > 0 && bij.complete && cFlips[c] === 0 && cInvalid[c] === 0 && !bij.badCharts.has(c)
       });
     }
     const effectivePadding = opts.effectivePaddingTexels !== undefined ? opts.effectivePaddingTexels : opts.paddingTexels;
@@ -483,10 +483,25 @@ UVCore.define('metrics', function (C) {
           for (let q = p + 1; q < count[c + 1]; q++) {
             const j = list[q];
             if (tested++ >= maxPairs) { complete = false; break intersectionChecks; }
-            if (shares(i, j)) continue;
             if (Math.max(sx0[i], sx1[i]) < Math.min(sx0[j], sx1[j]) || Math.max(sx0[j], sx1[j]) < Math.min(sx0[i], sx1[i])) continue;
             if (Math.max(sy0[i], sy1[i]) < Math.min(sy0[j], sy1[j]) || Math.max(sy0[j], sy1[j]) < Math.min(sy0[i], sy1[i])) continue;
             const o1 = orient(sx0[i], sy0[i], sx1[i], sy1[i], sx0[j], sy0[j]), o2 = orient(sx0[i], sy0[i], sx1[i], sy1[i], sx1[j], sy1[j]);
+            if (o1 === 0 && o2 === 0) {
+              const dx = sx1[i] - sx0[i], dy = sy1[i] - sy0[i];
+              const sameDirection = dx * (sx1[j] - sx0[j]) + dy * (sy1[j] - sy0[j]) > 0;
+              const overlap = Math.abs(dx) >= Math.abs(dy)
+                ? Math.min(Math.max(sx0[i], sx1[i]), Math.max(sx0[j], sx1[j])) - Math.max(Math.min(sx0[i], sx1[i]), Math.min(sx0[j], sx1[j]))
+                : Math.min(Math.max(sy0[i], sy1[i]), Math.max(sy0[j], sy1[j])) - Math.max(Math.min(sy0[i], sy1[i]), Math.min(sy0[j], sy1[j]));
+              // Positive triangles lie left of each directed boundary edge.
+              // Coincident edges with the same direction bound overlapping
+              // interiors; opposite directions are legal shared boundaries.
+              if (sameDirection && overlap > 0 && faceFlag[segs[2 * i]] === 0 && faceFlag[segs[2 * j]] === 0) {
+                if (sc[i] === sc[j]) selfSet.add(sc[i]);
+                else pairSet.add(Math.min(sc[i], sc[j]) + ',' + Math.max(sc[i], sc[j]));
+              }
+              continue;
+            }
+            if (shares(i, j)) continue;
             if (!((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0))) continue;
             const o3 = orient(sx0[j], sy0[j], sx1[j], sy1[j], sx0[i], sy0[i]), o4 = orient(sx0[j], sy0[j], sx1[j], sy1[j], sx1[i], sy1[i]);
             if (!((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) continue;

@@ -212,7 +212,7 @@
       if (!this._originalMaps) this._originalMaps = new Map();
       if (this._originalMaps.has(src)) return this._originalMaps.get(src);
       const tex = src.clone();
-      src.updateMatrix();
+      if (src.matrixAutoUpdate) src.updateMatrix();
       tex.matrixAutoUpdate = false;
       tex.matrix.copy(src.matrix).multiply(new root.THREE.Matrix3().set(1, 0, 0, 0, -1, 1, 0, 0, 1));
       tex.needsUpdate = true;
@@ -270,7 +270,9 @@
     frame() {
       if (!this.mesh) return;
       const s = this.mesh.geometry.boundingSphere, THREE = root.THREE;
-      const r = Math.max(s.radius, 1e-3), d = r / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2)) * 1.1;
+      const halfFov = THREE.MathUtils.degToRad(this.camera.fov / 2);
+      const fitAngle = Math.min(halfFov, Math.atan(Math.tan(halfFov) * this.camera.aspect));
+      const r = Math.max(s.radius, 1e-3), d = r / Math.sin(fitAngle) * 1.1;
       const dir = new THREE.Vector3(0.8, 0.55, 1).normalize();
       this.camera.position.copy(s.center).addScaledVector(dir, d);
       this.camera.near = d / 200; this.camera.far = d * 20;

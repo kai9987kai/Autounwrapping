@@ -238,6 +238,10 @@ test('duplicate same-winding faces overlap, while shared triangle edges do not',
   const r = C.computeMetrics(m, uv, new Int32Array(m.faceCount), null);
   assert.equal(r.score.valid, false);
   assert.ok(r.overlapTexels > 0);
+  const tinyUV = uvFrom(m, (x, y) => [1e-4 * x + 0.4, 1e-4 * y + 0.6]);
+  const tiny = C.computeMetrics(m, tinyUV, new Int32Array(m.faceCount), null, { rasterRes: 16 });
+  assert.equal(tiny.overlapTexels, 0);
+  assert.equal(tiny.bijectivity.valid, false, 'coincident same-direction boundaries overlap even below raster resolution');
   const patch = C.buildMesh(a);
   const shared = C.computeMetrics(patch, uv.slice(0, 12), new Int32Array([0, 1]), null);
   assert.equal(shared.bijectivity.valid, true);

@@ -176,7 +176,7 @@
       const col = m.color || [0.8, 0.8, 0.8];
       const lin = m.colorSpace === 'linear' ? col : col.map(v => Math.pow(Math.max(0, v), 2.2));
       const srcXform = new THREE.Matrix3();
-      if (m.map && m.map.image) { m.map.updateMatrix(); srcXform.copy(m.map.matrix); }
+      if (m.map && m.map.image) { if (m.map.matrixAutoUpdate) m.map.updateMatrix(); srcXform.copy(m.map.matrix); }
       return new THREE.ShaderMaterial({ vertexShader: VS, fragmentShader: FS_TRANSFER, side: THREE.DoubleSide, depthTest: false, depthWrite: false,
         uniforms: {
           map: { value: map }, hasMap: { value: map ? 1 : 0 }, colorLinear: { value: new THREE.Vector3().fromArray(lin) },

@@ -39,6 +39,17 @@
   const baseName = (n) => U.exporters.safeName(n || 'model');
 
   function setStatus(text) { $('status-text').textContent = text; }
+  function cancelCurrent() {
+    if (state.exporting) return;
+    if (state.loading) {
+      state.loadCancelled = true;
+      if (state.operationClient) state.operationClient.cancel();
+      setStatus('Cancelling load…');
+    } else if (state.busy) state.client.cancel();
+  }
+  function checkLoadCancelled() {
+    if (state.loadCancelled) { const e = new Error('Load cancelled'); e.name = 'CancelError'; throw e; }
+  }
   function setProgress(frac, indeterminate) {
     $('progress').classList.toggle('indeterminate', !!indeterminate);
     $('progress-fill').style.width = indeterminate ? '' : Math.round(100 * Math.max(0, Math.min(1, frac))) + '%';
@@ -116,7 +127,7 @@
 
   /* ---------------- results ---------------- */
   function heatFor(mode) {
-    const r = state.result;
+    const r = state.analysis || state.result;
     if (mode === 'none' || !r) return null;
     const m = r.metrics, F = m.faces, out = new Float32Array(F);
     if (mode === 'visibility') {
@@ -149,6 +160,7 @@
     opts = opts || {};
     state.result = r;
     state.analysis = null;
+    $('btn-current-result').hidden = true;
     if (r.opts) {
       state.settings = clone(r.opts);
       state.presetKey = r.opts.preset || 'game_hero';
@@ -156,13 +168,13 @@
       save(LS.settings, { presetKey: state.presetKey, settings: state.settings });
     }
     state.selected = -1;
-    if (state.baked) state.bakeStale = true;
+    if (state.baked && !opts.displayOnly) state.bakeStale = true;
     state.viewport.setResult(r);
     state.viewport.highlightChart(-1);
     state.viewport.setHeat($('view-heat').value, heatFor($('view-heat').value));
     state.uvView.setData({ uv: r.uv, faceChart: r.faceChart, metrics: r.metrics, resolution: r.packing ? r.packing.resolution : state.settings.packing.resolution, chartCount: r.metrics.chartCount });
     renderPanels(r);
-    U.panels.pushHistory(r.metrics);
+    if (!opts.displayOnly) U.panels.pushHistory(r.metrics);
     if (r.notes && r.notes.length) U.panels.log(r.notes);
     const m = r.metrics;
     U.panels.log((opts.label || 'Result') + ': score ' + m.score.score + ', ' + m.chartCount + ' charts, SD ' + m.sdMean.toFixed(4) + ', texture use ' + (100 * m.efficiency.textureEff).toFixed(1) + '%, ' + Math.round(r.timings.total) + ' ms');
@@ -179,7 +191,7 @@
   }
 
   function chartInfo(id) {
-    const r = state.result;
+    const r = state.analysis || state.result;
     if (!r || id < 0) return null;
     const pc = r.metrics.perChart[id], ch = r.charts[id] || {};
     return pc ? Object.assign({}, pc, { initMethod: ch.initMethod, fallbacks: ch.fallbacks }) : null;
@@ -207,6 +219,7 @@
   function clearResult() {
     state.result = null;
     state.analysis = null;
+    $('btn-current-result').hidden = true;
     state.selected = -1;
     state.viewport.setResult(null);
     state.viewport.highlightChart(-1);
@@ -217,7 +230,7 @@
   }
 
   async function takeSnapshot(label) {
-    try { return { snap: await state.client.snapshot(), label }; } catch (e) { return null; }
+    try { return { snap: await state.client.snapshot(), label }; } catch (e) { if (e && e.name === 'CancelError') throw e; return null; }
   }
   function commitUndo(entry) {
     if (!entry) return;
@@ -236,6 +249,7 @@
       if (opts.undo !== false) entry = await takeSnapshot(label);
       const t0 = performance.now();
       const r = await fn();
+      if (r && (r.metrics || r.best)) state.recoverySnapshot = await state.client.snapshot();
       if (r && (r.metrics || r.best)) commitUndo(entry);
       if (r && r.metrics) applyResult(r, { label });
       else if (r && r.best) applyResult(r.best, { label });
@@ -249,7 +263,8 @@
         if (state.client.mode === 'worker') {
           try {
             await state.client.ready;
-            const back = entry ? await state.client.restore(entry.snap) : null;
+            const recovery = entry ? entry.snap : state.recoverySnapshot;
+            const back = recovery ? await state.client.restore(recovery) : null;
             if (back) applyResult(back, { label: 'Cancelled — previous result kept' }); else clearResult();
           } catch (e) { clearResult(); }
         }
@@ -283,6 +298,8 @@
 
   function fixMetric(metric) {
     const s = state.settings;
+    if (state.analysis) { toast('Use imported layout first to edit the UVs being inspected.', 'warn'); return; }
+    if (metric === 'gate' && state.result && state.result.metrics.score.valid) return runRepack();
     if (metric === 'sd' || metric === 'area' || metric === 'gate') return runRelax();
     if (metric === 'angle') { s.parameterizer = 'bff'; s.segmentation.angleDeg = Math.max(20, s.segmentation.angleDeg - 10); syncControls(); return runUnwrap(); }
     if (metric === 'td') { s.packing.equalizeDensity = true; syncControls(); return runRepack(); }
@@ -298,6 +315,7 @@
       const prev = state.undo.pop();
       state.redo.push({ snap: current, label: prev.label });
       const r = await state.client.restore(prev.snap);
+      state.recoverySnapshot = prev.snap;
       if (r) applyResult(r, { label: 'Undo ' + prev.label }); else clearResult();
       await refreshManualSeams();
     } catch (e) { toast('Undo failed: ' + e.message, 'error'); } finally { setBusy(false); }
@@ -310,6 +328,7 @@
       const next = state.redo.pop();
       state.undo.push({ snap: current, label: next.label });
       const r = await state.client.restore(next.snap);
+      state.recoverySnapshot = next.snap;
       if (r) applyResult(r, { label: 'Redo ' + next.label }); else clearResult();
       await refreshManualSeams();
     } catch (e) { toast('Redo failed: ' + e.message, 'error'); } finally { setBusy(false); }
@@ -393,20 +412,26 @@
   async function setModel(model, project) {
     if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
     let candidate = null, committed = false;
+    if (!state.loading) state.loadCancelled = false;
+    state.loading = true;
     setBusy(true, project ? 'Restoring project…' : 'Preparing mesh…');
     try {
       candidate = new U.EngineClient();
       state.operationClient = candidate;
       await candidate.init();
+      checkLoadCancelled();
       candidate.onProgress(engineProgress);
       const meshInfo = await candidate.setMesh(model.positions);
       if (model.originalUV) await candidate.setSourceUV(model.originalUV);
       const settings = project && project.settings ? project.settings : state.settings;
       const result = project && project.snapshot ? await candidate.restore(project.snapshot) : await candidate.unwrap(settings);
       if (result && result.cancelled) throw new Error('Load cancelled.');
+      const recoverySnapshot = await candidate.snapshot();
+      checkLoadCancelled();
       const previous = state.client;
       state.client = candidate;
       state.meshInfo = meshInfo;
+      state.recoverySnapshot = recoverySnapshot;
       committed = true;
       if (previous) previous.dispose();
       if (project && project.settings) { state.settings = clone(project.settings); state.presetKey = project.presetKey || 'game_hero'; syncControls(); }
@@ -434,11 +459,14 @@
       else setStatus('Project restored — no UV result saved');
       state.undo = []; state.redo = [];
     } catch (e) {
-      toast('Could not load model: ' + e.message + '. Previous work kept.', 'error');
-      setStatus('Load failed — previous work kept');
+      const cancelled = e && e.name === 'CancelError';
+      toast((cancelled ? 'Load cancelled' : 'Could not load model: ' + e.message) + '. Previous work kept.', cancelled ? 'warn' : 'error');
+      setStatus((cancelled ? 'Load cancelled' : 'Load failed') + ' — previous work kept');
     } finally {
       if (candidate && !committed) candidate.dispose();
+      if (!committed) for (const m of model.materials || []) if (m.map && m.map.dispose) m.map.dispose();
       state.operationClient = null;
+      state.loading = false;
       setBusy(false);
     }
   }
@@ -450,15 +478,18 @@
     if (list.length === 1 && /\.(uvtk|json)$/i.test(list[0].name) && !/\.gltf$/i.test(list[0].name)) {
       return loadProjectFile(list[0]);
     }
+    state.loading = true; state.loadCancelled = false;
     setBusy(true, 'Reading ' + list.map(f => f.name).join(', ') + '…');
     try {
       const model = await U.loaders.loadFiles(list, { maxFaces: 1500000 });
+      if (state.loadCancelled) { for (const m of model.materials || []) if (m.map && m.map.dispose) m.map.dispose(); checkLoadCancelled(); }
       setBusy(false);
       await setModel(model);
     } catch (e) {
       console.error(e);
       toast(e.message || String(e), 'error');
       setStatus('Load failed');
+      state.loading = false;
       setBusy(false);
     }
   }
@@ -490,9 +521,13 @@
   }
 
   async function exportAction(kind) {
+    if (state.busy) return;
     const X = U.exporters, model = state.model, r = state.result, name = baseName(model && model.name);
     if (kind === 'load-project') { $('project-input').click(); return; }
-    if (!model || !r) { toast('Unwrap a model first.', 'warn'); return; }
+    if (!model || (!r && kind !== 'project')) { toast('Unwrap a model first.', 'warn'); return; }
+    state.exporting = true;
+    setBusy(true, 'Exporting…');
+    $('btn-cancel').hidden = true;
     try {
       if (state.baked && state.bakeStale && (kind === 'glb' || kind === 'baked' || kind === 'bundle')) toast('The baked texture is from an earlier layout — re-bake to match the current UVs.', 'warn', 6000);
       if (kind === 'glb') X.downloadBlob(await X.exportGLB(model.positions, r.uv, name, { normals: model.normals, texture: state.baked && !state.bakeStale ? state.baked : null }), name + '_uv.glb');
@@ -531,7 +566,6 @@
         X.downloadBlob(await X.makeZip(entries), name + '_uv_bundle.zip');
         setStatus('Bundle exported');
       } else if (kind === 'project') {
-        if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
         const snapshot = await state.client.snapshot();
         const materials = await X.captureMaterials(model.materials);
         X.downloadBlob(X.saveProject({ materials, meshCount: model.meshCount, name: model.name, positions: model.positions, normals: model.normals, originalUV: model.originalUV, faceMaterial: model.faceMaterial, settings: state.settings, presetKey: state.presetKey, snapshot }), name + '.uvtk.json');
@@ -539,6 +573,9 @@
     } catch (e) {
       console.error(e);
       toast('Export failed: ' + e.message, 'error');
+    } finally {
+      state.exporting = false;
+      setBusy(false);
     }
   }
 
@@ -549,14 +586,17 @@
 
   async function loadProjectFile(file) {
     if (state.busy) { toast('Wait for the current operation to finish.', 'warn'); return; }
+    state.loading = true; state.loadCancelled = false;
     setBusy(true, 'Reading project…');
     try {
       const p = await U.exporters.loadProject(file);
       const materials = await U.exporters.restoreMaterials(p.materials);
+      if (state.loadCancelled) { for (const m of materials) if (m.map) m.map.dispose(); checkLoadCancelled(); }
       const model = { positions: p.positions, normals: p.normals || null, originalUV: p.originalUV || null, faceMaterial: p.faceMaterial || null, materials, name: p.name || 'project', format: 'project', meshCount: p.meshCount || 1, faceCount: p.positions.length / 9, droppedDegenerate: 0, warnings: p.warnings || [] };
       setBusy(false);
       await setModel(model, p);
     } catch (e) {
+      state.loading = false;
       setBusy(false);
       toast('Could not load project: ' + e.message + '. Previous work kept.', 'error');
       setStatus('Load failed — previous work kept');
@@ -573,6 +613,11 @@
       const islands = state.core.islandsFromUV(sourceMesh, state.model.originalUV);
       const pseudo = { uv: state.model.originalUV, faceChart: islands.faceChart, metrics: m, charts: [], timings: { total: 0 }, packing: null, projection: true, notes: [] };
       state.analysis = pseudo;
+      state.selected = -1;
+      $('btn-current-result').hidden = !state.result;
+      state.viewport.setResult(pseudo);
+      state.viewport.highlightChart(-1);
+      state.viewport.setHeat('none', null);
       renderPanels(pseudo);
       state.uvView.setData({ uv: pseudo.uv, faceChart: pseudo.faceChart, metrics: m, resolution: state.settings.packing.resolution, chartCount: islands.chartCount });
       state.compare.push(compareEntry(pseudo, 'Imported UVs', 'The model\'s original UV layout'));
@@ -651,10 +696,11 @@
     $('btn-search').addEventListener('click', runSearch);
     $('btn-undo').addEventListener('click', undo);
     $('btn-redo').addEventListener('click', redo);
-    $('btn-cancel').addEventListener('click', () => (state.operationClient || state.client).cancel());
+    $('btn-cancel').addEventListener('click', cancelCurrent);
     $('btn-bake').addEventListener('click', bake);
     $('btn-analyze-source').addEventListener('click', analyzeSource);
     $('btn-adopt-source').addEventListener('click', adoptSource);
+    $('btn-current-result').addEventListener('click', () => { if (state.result && !state.busy) applyResult(state.result, { label: 'Current result', displayOnly: true }); });
     $('btn-transform-chart').addEventListener('click', transformSelected);
     $('btn-benchmark').addEventListener('click', benchmark);
     $('btn-pin').addEventListener('click', pinCurrent);
@@ -698,10 +744,11 @@
         if (res.edge >= 0) { await refreshManualSeams(); setStatus('Edge ' + res.edge + (res.value ? ' cut' : ' welded') + ' — press Unwrap (U) to apply'); updateButtons(); }
         return;
       }
-      if (state.result) selectChart(state.result.faceChart[hit.face]);
+      const shown = state.analysis || state.result;
+      if (shown) selectChart(shown.faceChart[hit.face]);
     });
     vp.on('hover', (hit) => {
-      const r = state.result;
+      const r = state.analysis || state.result;
       $('hover3d').textContent = hit ? ('face ' + hit.face + (r ? ' · chart ' + r.faceChart[hit.face] + (r.metrics.faceSD ? ' · SD ' + (isFinite(r.metrics.faceSD[hit.face]) ? r.metrics.faceSD[hit.face].toFixed(3) : 'flipped') : '') : '')) : '';
     });
     $('view-texture').addEventListener('change', (e) => vp.setTextureMode(e.target.value));
@@ -789,7 +836,7 @@
       if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
       if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (k === 'escape') { if (state.busy) state.client.cancel(); else if (seamTool.getAttribute('aria-pressed') === 'true') setSeamTool(false); }
+      if (k === 'escape') { if (state.busy) cancelCurrent(); else if (seamTool.getAttribute('aria-pressed') === 'true') setSeamTool(false); }
       else if (k === 'u') runUnwrap();
       else if (k === 'r' && !$('btn-relax').disabled) runRelax();
       else if (k === 'p' && !$('btn-repack').disabled) runRepack();

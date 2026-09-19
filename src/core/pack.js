@@ -538,6 +538,23 @@ UVCore.define('pack', function (C) {
       }
       if (run && fits(run)) lo = { D, run };
       else {
+        if (!opts.__paddingFallback) {
+          // When gutters alone exhaust the atlas, shrinking chart geometry
+          // drives it below Float32 precision without making those gutters fit.
+          // Pack a useful layout at a larger size, then scale the entire result
+          // back uniformly and report the actual reduced padding explicitly.
+          const needed = Math.max(2 * R, 2 * Math.sqrt(n) * o2);
+          const expandedR = Math.pow(2, Math.ceil(Math.log2(needed)));
+          const expanded = packCharts(charts, Object.assign({}, opts, { resolution: expandedR, __work: false, __paddingFallback: true }), progress);
+          const ratio = R / expandedR;
+          expanded.resolution = R;
+          expanded.texelsPerUnit *= ratio;
+          expanded.effectivePadding *= ratio;
+          expanded.requestedPadding = opts.paddingTexels;
+          expanded.fits = false;
+          expanded.scaleSearchPacks += packs;
+          return expanded;
+        }
         if (lastD !== bestD) { run = packer(prepared, order, bestD, opts); packs++; lastD = bestD; }
         if (!run) throw new Error('packCharts: charts cannot be placed (a single chart exceeds the working atlas).');
         lo = { D: bestD, run };

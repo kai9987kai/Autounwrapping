@@ -4,7 +4,7 @@
 (function (root) {
   'use strict';
   const UVApp = root.UVApp = root.UVApp || {};
-  const TOOL = 'Advanced 3D UV Toolkit v4';
+  const TOOL = 'Advanced 3D UV Toolkit v4.1';
 
   function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
@@ -256,6 +256,7 @@
         if (!t || typeof t.image !== 'string' || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(t.image) || t.image.length > PROJECT_MAX_BYTES) throw new Error('Project texture must be an embedded PNG, JPEG or WebP image.');
         if (!Number.isInteger(t.width) || !Number.isInteger(t.height) || t.width < 1 || t.height < 1 || t.width > 16384 || t.height > 16384 || t.width * t.height > 67108864) throw new Error('Project texture dimensions are invalid or too large.');
         if (!finiteList(t.matrix, 9) || typeof t.flipY !== 'boolean' || ![1000, 1001, 1002].includes(t.wrapS) || ![1000, 1001, 1002].includes(t.wrapT)) throw new Error('Project has invalid texture transforms.');
+        if (t.matrixAutoUpdate !== undefined && (typeof t.matrixAutoUpdate !== 'boolean' || !finiteList(t.offset, 2) || !finiteList(t.repeat, 2) || !finiteList(t.center, 2) || !Number.isFinite(t.rotation))) throw new Error('Project has invalid texture transform parameters.');
         if (![3000, 3001].includes(t.encoding) || ![1003, 1006].includes(t.magFilter) || ![1003, 1004, 1005, 1006, 1007, 1008].includes(t.minFilter) || !Number.isFinite(t.anisotropy) || t.anisotropy < 1 || t.anisotropy > 64) throw new Error('Project has invalid texture sampling settings.');
       }
     }
@@ -278,6 +279,7 @@
           if (t.matrixAutoUpdate) t.updateMatrix();
           item.map = { image: 'data:image/png;base64,' + bytesToBase64(new Uint8Array(await blob.arrayBuffer())), width, height,
             matrix: Array.from(t.matrix.elements), flipY: t.flipY !== false, wrapS: t.wrapS, wrapT: t.wrapT,
+            matrixAutoUpdate: t.matrixAutoUpdate, offset: t.offset.toArray(), repeat: t.repeat.toArray(), center: t.center.toArray(), rotation: t.rotation,
             encoding: t.encoding, magFilter: t.magFilter, minFilter: t.minFilter, anisotropy: t.anisotropy };
         } catch (e) { throw new Error('Could not embed texture for material "' + item.name + '": ' + e.message); }
       }
@@ -302,7 +304,13 @@
           const actual = item.map.image;
           if ((actual.naturalWidth || actual.width) !== saved.width || (actual.naturalHeight || actual.height) !== saved.height) throw new Error('Embedded texture dimensions do not match the project metadata.');
           for (const key of ['flipY', 'wrapS', 'wrapT', 'encoding', 'magFilter', 'minFilter', 'anisotropy']) item.map[key] = saved[key];
-          item.map.matrixAutoUpdate = false;
+          // Older v2 descriptors only stored a matrix. Keep that matrix exact;
+          // newer descriptors also retain the editable THREE transform fields.
+          item.map.matrixAutoUpdate = saved.matrixAutoUpdate === true;
+          if (saved.matrixAutoUpdate !== undefined) {
+            for (const key of ['offset', 'repeat', 'center']) item.map[key].fromArray(saved[key]);
+            item.map.rotation = saved.rotation;
+          }
           item.map.matrix.fromArray(saved.matrix);
           item.map.needsUpdate = true;
         } else out.push(item);
@@ -333,12 +341,18 @@
         if (!s.manualCut) throw new Error('Project snapshot is missing manual seams.');
         numericArray(s.cut, s.manualCut.length, 'snapshot seams', ['Uint8Array']);
         if (!Array.isArray(s.chartFaces) || !Array.isArray(s.chartUV) || s.chartFaces.length !== s.chartUV.length || s.chartFaces.length > F || !Array.isArray(s.notes) || s.notes.some(n => typeof n !== 'string') || !s.opts || typeof s.opts !== 'object') throw new Error('Project has invalid snapshot charts or options.');
+        if (s.chartTris !== undefined && (!Array.isArray(s.chartTris) || s.chartTris.length !== s.chartFaces.length)) throw new Error('Project has invalid chart triangles.');
         const visited = new Uint8Array(F);
         for (let ci = 0; ci < s.chartFaces.length; ci++) {
           const faces = s.chartFaces[ci], uv = s.chartUV[ci];
           numericArray(faces, faces.length, 'chart faces', ['Int32Array']);
           numericArray(uv, uv.length, 'chart UVs', ['Float64Array']);
           if (!faces.length || !uv.length || uv.length % 2) throw new Error('Project has an empty or malformed chart.');
+          if (s.chartTris) {
+            const tris = s.chartTris[ci];
+            numericArray(tris, faces.length * 3, 'chart triangles', ['Int32Array']);
+            for (const vertex of tris) if (vertex < 0 || vertex >= uv.length / 2) throw new Error('Project chart triangle index is out of range.');
+          }
           for (const f of faces) {
             if (f < 0 || f >= F || visited[f] || s.faceChart[f] !== ci) throw new Error('Project chart membership is inconsistent.');
             visited[f] = 1;
@@ -367,7 +381,12 @@
     const state = decodeDeep(data);
     validateProject(state);
     state.warnings = Array.isArray(state.warnings) ? state.warnings.filter(w => typeof w === 'string') : [];
-    if (!state.materials) state.warnings.push('This project has no saved materials or textures; neutral material colours will be used. Re-import the original model to recover its appearance.');
+    if (!state.materials) {
+      // Legacy files retained material indices without the corresponding
+      // materials. Clear those indices to match the single neutral fallback.
+      state.faceMaterial = null;
+      state.warnings.push('This project has no saved materials or textures; neutral material colours will be used. Re-import the original model to recover its appearance.');
+    }
     return state;
   }
 

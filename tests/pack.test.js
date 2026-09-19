@@ -176,6 +176,7 @@ test('padding evidence follows final atlas scale and the coarse working resoluti
   assert.ok(reduced.effectivePadding > 0 && reduced.effectivePadding < 16);
   assert.equal(reduced.requestedPadding, 16);
   assert.equal(reduced.paddingSource, 'packer');
+  for (const rect of reduced.rects) assert.ok(rect.w * rect.h > 1e-4, 'padding fallback must preserve representable chart area');
   const coarse = C.packCharts(charts, { resolution: 2048, workResolution: 512, paddingTexels: 5 });
   assert.equal(coarse.resolution, 2048);
   assert.equal(coarse.requestedPadding, 5);

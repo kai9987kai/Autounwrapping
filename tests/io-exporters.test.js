@@ -133,12 +133,13 @@ test('project validation rejects unsafe keys, non-finite geometry and mismatched
 });
 
 test('v1 projects remain readable and disclose missing materials', async () => {
-  const old = JSON.parse(await X.saveProject({ positions: F.cube() }).text()); old.version = 1;
+  const old = JSON.parse(await X.saveProject({ positions: F.cube(), faceMaterial: new Uint16Array(12).fill(3) }).text()); old.version = 1;
   const back = await X.loadProject(JSON.stringify(old));
   assert.ok(back.warnings.some(w => /no saved materials/.test(w)));
   const neutral = await X.restoreMaterials(back.materials);
   assert.equal(neutral.length, 1);
   assert.equal(neutral[0].map, null);
+  assert.equal(back.faceMaterial, null, 'legacy indices agree with the single neutral fallback');
 });
 
 test('project snapshots preserve chart membership and reject corrupted face ownership', async () => {
@@ -149,6 +150,11 @@ test('project snapshots preserve chart membership and reject corrupted face owne
   const good = await browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions, snapshot }));
   const restored = engine.restore(good.snapshot);
   assert.equal(restored.metrics.faces, positions.length / 9);
+  assert.deepEqual(Array.from(good.snapshot.chartTris[0]), Array.from(snapshot.chartTris[0]));
+  const triangle = snapshot.chartTris[0][0];
+  snapshot.chartTris[0][0] = snapshot.chartUV[0].length;
+  await assert.rejects(browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions, snapshot })), /triangle index/);
+  snapshot.chartTris[0][0] = triangle;
   snapshot.chartFaces[0][0] = positions.length / 9;
   await assert.rejects(browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions, snapshot })), /membership/);
 });
@@ -179,8 +185,15 @@ test('material project helpers retain colours, texture transforms and sampler se
   assert.equal(restored[0].map.flipY, false);
   assert.equal(restored[0].map.wrapT, T.MirroredRepeatWrapping);
   assert.equal(restored[0].map.encoding, T.sRGBEncoding);
-  assert.equal(restored[0].map.matrixAutoUpdate, false);
+  assert.equal(restored[0].map.matrixAutoUpdate, true);
+  restored[0].map.updateMatrix();
   assert.deepEqual(Array.from(restored[0].map.matrix.elements), Array.from(texture.matrix.elements));
+  assert.deepEqual(Array.from(restored[0].map.offset.toArray()), [0.2, 0.3]);
+  assert.equal(restored[0].map.rotation, 0.4);
+  materials[0].map.matrixAutoUpdate = false;
+  const frozen = await browser.UVApp.exporters.restoreMaterials(materials);
+  assert.equal(frozen[0].map.matrixAutoUpdate, false);
+  assert.deepEqual(Array.from(frozen[0].map.matrix.elements), Array.from(texture.matrix.elements));
   assert.equal(restored[1].map, null);
   const faceMaterial = new Uint16Array(F.cube().length / 9).fill(1);
   const project = await browser.UVApp.exporters.loadProject(browser.UVApp.exporters.saveProject({ positions: F.cube(), materials, faceMaterial }));

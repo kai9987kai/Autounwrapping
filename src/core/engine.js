@@ -132,11 +132,12 @@ UVCore.define('engine', function (C) {
 
     setCut(cut) {
       const m = this._requireMesh();
-      this.manualCut = new Uint8Array(m.edgeCount);
+      const next = new Uint8Array(m.edgeCount);
       if (cut && typeof cut !== 'function') {
         if (cut.length !== m.edgeCount) throw new Error('setCut: expected ' + m.edgeCount + ' edge flags, got ' + cut.length);
-        for (let e = 0; e < m.edgeCount; e++) this.manualCut[e] = cut[e] ? 1 : 0;
+        for (let e = 0; e < m.edgeCount; e++) next[e] = cut[e] ? 1 : 0;
       }
+      this.manualCut = next;
       return this.countSeams();
     }
     getCut() { this._requireMesh(); return Uint8Array.from(this.lastCut); }
