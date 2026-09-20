@@ -1,8 +1,20 @@
-# UV Toolkit v4 — Browser UV Unwrapping Laboratory
+# UV Toolkit v4.1 — Browser UV Unwrapping Laboratory
 
 A no-install, no-build UV unwrapping and UV-quality lab that runs entirely in the browser (it even works when you open `index.html` straight from disk). Load a model, get a production-style UV atlas, see exactly how good it is on a calibrated 0–100 score, fix what the tool tells you to fix, and export the model with its new UVs — and, if it was textured, with its texture re-baked onto the new layout.
 
-v4 is a ground-up rewrite of the v3 single-file app around a tested geometry kernel built from current research (Boundary First Flattening, SLIM, xatlas/Blender-style bitmap packing, Seamster-style visibility-aware seams). The previous version is kept at [`legacy/index-v3.html`](legacy/index-v3.html) for comparison.
+v4 is a ground-up rewrite of the v3 single-file app around a tested geometry kernel (Boundary First Flattening, SLIM, xatlas/Blender-style bitmap packing, Seamster-style visibility-aware seams). v4.1 adds editable imported layouts, mesh diagnostics and stronger validation and project recovery. The previous single-file version is kept at [`legacy/index-v3.html`](legacy/index-v3.html) for comparison.
+
+## New in v4.1
+
+- **Reuse artist UVs:** Texture & bake → **Use imported layout** keeps the original coordinates and internal seams. Edit, relax or repack without first re-flattening the mesh.
+- **Edit individual islands:** click an island in either view, then rotate, scale or move it from the chart inspector. Undo/redo restores exact coordinates. Turn off **Equalise texel density** to preserve relative island sizes on repack; packing chooses fresh positions and orientations.
+- **Inspect mesh health:** duplicates, collapsed faces, slivers, non-manifold edges and inconsistent winding have counts and repair guidance. Open surfaces remain supported.
+- **Trustworthy diagnostics:** collapsed, nonfinite, unassigned and out-of-range UVs cannot pass validity. Nested disconnected pieces and coincident same-winding boundaries are checked even within one chart ID. Local texel-density CV includes variation within islands; `chartCV` retains the island-average statistic.
+- **Honest padding evidence:** imported/manual layouts have unknown padding until repacked. Reports show actual effective margins, including reductions when the requested gutters cannot fit. Impossible-padding fallback preserves chart area instead of collapsing the layout. Mip levels are estimates, not guarantees for every renderer/filter.
+- **Durable projects:** v2 projects embed material colours, textures, transforms and material assignments. v1 remains readable, with an explicit neutral-material warning when texture data was never saved. Failed or cancelled loads preserve the current session; worker restarts retain accepted state.
+- **Consistent views:** original textures respect material groups, undo restores settings, analysis uses the actual imported island IDs, narrow 3D panes frame the whole object, and UV zoom adapts to resizing.
+
+See [v4.1 research and implementation notes](docs/UPGRADE-4.1.md) for the connection to PartUV (2025/2026), TABI (2026), FastAtlas (2025) and xatlas, plus implementation limits. These papers inform the design; their neural/GPU pipelines are not implemented here.
 
 ---
 
@@ -20,9 +32,9 @@ v4 is a ground-up rewrite of the v3 single-file app around a tested geometry ker
 | Textures | – | **GPU re-bake** of the original texture onto the new UVs; UV-space position / normal / chart-ID / mask maps for AI texturing |
 | Editing | – | **Seam tool** (click edges in 3D), hard-edge seams, **reuse imported seams**, undo / redo, **A/B compare**, auto-tune, benchmark |
 | Responsiveness | Main thread | **Web Worker** engine with progress and cancel (main-thread fallback) |
-| Tests | – | **~130 node tests** covering every kernel module, IO and the worker protocol |
+| Tests | – | **165 node tests** covering the kernel, IO, worker protocol and views; optional browser workflow checks |
 
-Measured on the default torus knot (7,680 triangles): L2 stretch **1.0048 → 1.0003**, symmetric Dirichlet **1.0067 → 1.0005**, atlas coverage **22% → 42–46%**, zero flips and zero overlaps in both.
+Historical v3 → v4 measurements on the default torus knot (7,680 triangles): L2 stretch **1.0048 → 1.0003**, symmetric Dirichlet **1.0067 → 1.0005**, atlas coverage **22% → 42–46%**, zero flips and zero overlaps in both. These are not a benchmark of v4.1 against external tools.
 
 ---
 
@@ -55,7 +67,7 @@ and visit <http://localhost:8000>. No dependencies are installed; Node ≥ 20 is
 - **Flattening:** Boundary First Flattening (default), LSCM, mean-value Tutte (always injective), planar projection.
 - **Optimisation:** SLIM (symmetric Dirichlet) or ARAP, with a flip-blocking line search so results never fold.
 - **Seams:** chart angle, maximum chart size, refinement rounds; cut every edge sharper than an angle; hide seams in occluded areas (visibility field rendered from 48 directions); click-to-cut seam tool; reuse the seams of imported UVs.
-- **Packing:** bitmap packer with 90° rotations, texel-density equalisation, padding in texels (mip-safe to `log2(padding)`), texture sizes from 256 to 4096; skyline rectangles as a fast alternative.
+- **Packing:** bitmap packer with 90° rotations, texel-density equalisation, padding in texels (estimated mip allowance `floor(log2(effectivePadding))`), texture sizes from 256 to 4096; skyline rectangles as a fast alternative.
 - **Relax / Repack / Auto-tune:** refine existing charts, re-run packing alone, or search neighbouring chart angles and keep the best-scoring valid result.
 
 ### Quality analysis
@@ -65,7 +77,7 @@ and visit <http://localhost:8000>. No dependencies are installed; Node ≥ 20 is
 - **Grade imported UVs** with the same metrics and pin them next to generated layouts in **Compare**.
 
 ### Textures and export
-- **Re-bake texture:** renders each triangle at its new UV position on the GPU while sampling the original texture at its old UVs (2× supersampled), then fills gutters with pull-push so mip-maps never bleed.
+- **Re-bake texture:** renders each triangle at its new UV position on the GPU while sampling the original texture at its old UVs (2× supersampled), then fills gutters with pull-push to reduce seam bleeding. Verify filtering in the target renderer.
 - **UV-space maps:** object-space position, normal, chart-ID and coverage mask at 1K / 2K / 4K for texturing and AI-texturing pipelines.
 - **Export:** GLB (with baked texture), OBJ + MTL (+ texture), UV layout PNG, JSON quality report with methods and citations, ZIP bundle, and project files that restore mesh, UVs, seams and settings.
 
@@ -85,7 +97,7 @@ Undo / redo, A/B compare with deltas and restore, benchmark over the built-in mo
 
 ## Benchmarks
 
-Node 24, default Game-hero settings with a 1024 atlas and 4-texel padding:
+Historical v4 baseline: Node 24, Game-hero scoring with a 1024 atlas and 4-texel padding. Current scores may differ because v4.1 checks local density and invalid layouts more strictly:
 
 | Model | Charts | Score | L2 stretch | Sym. Dirichlet | Flips | Valid | Chart coverage | Time |
 |---|---|---|---|---|---|---|---|---|
@@ -135,10 +147,13 @@ tools/serve.js          zero-dependency dev server
 
 ```bash
 npm test          # node --test (about 20 s)
+npm run check     # syntax checks + the full regression suite
 npm run serve     # http://localhost:8000
 ```
 
 Kernel modules follow `UVCore.define(name, factory)` and may only use earlier modules' exports, so the exact same code runs on the main thread, inside the worker (rebuilt from `UVCore.source()`), and under node. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the contracts and [docs/RESEARCH.md](docs/RESEARCH.md) for the survey and the ideas queued for future versions (UDIM tiles, island stacking, pins and live unwrap, quad rectify, projected Newton).
+
+For optional end-to-end browser checks, install Playwright locally without adding a runtime dependency (`npm install --no-save --package-lock=false playwright`, then `npx playwright install chromium`) and run `npm run test:browser`. Alternatively set `PLAYWRIGHT_MODULE` to an existing installation; set `UVTK_BROWSER_CHANNEL=msedge` to use installed Edge. The script starts its own local server, tests real controls and file uploads, checks direct `file://` loading, and writes screenshots and receipts to ignored `output/browser-qa/`. It does not upload models.
 
 ---
 
@@ -146,7 +161,10 @@ Kernel modules follow `UVCore.define(name, factory)` and may only use earlier mo
 
 - Large meshes (≥ 30k triangles) take several seconds; the worker keeps the UI responsive and **Cancel** always works.
 - Visibility-aware seams are experimental: they reduce visible seam length on some models and have little effect on others.
-- No UDIM multi-tile packing, island stacking or interactive island transforms yet.
+- No UDIM multi-tile packing, island stacking, locked-island packing, or drag gizmos. Island transforms currently use numeric controls.
+- Mesh preflight diagnoses topology; it does not automatically repair/remesh geometry or test 3D surface self-intersection.
+- UV intersection tests use floating-point predicates and a bounded comparison budget. Incomplete checks fail validity; this is not a robust-predicate mathematical certificate.
+- Project texture embedding currently supports browser-readable colour images. Baked output is regenerated from saved source textures; it is not stored in project files. Legacy projects cannot recover textures they never contained.
 - Textures are re-baked in 8-bit sRGB; tangent-space normal maps are resampled but not re-oriented for the new tangent frame.
 - Spherical / cylindrical projections are for comparison and can overlap at their wrap seam.
 

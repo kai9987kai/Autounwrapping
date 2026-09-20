@@ -87,6 +87,27 @@ function check(label, condition) { assert.ok(condition, label); checks.push(labe
     await page.selectOption('#bake-size', '1024');
     await page.click('#btn-bake');
     check('reopened textures can be rebaked', await page.evaluate(() => !!UVApp.app.baked && !UVApp.app.bakeStale));
+    await page.click('#btn-analyze-source'); await idle();
+    await page.click('#btn-current-result');
+    check('returning from imported analysis keeps the existing bake current', await page.evaluate(() => !!UVApp.app.baked && !UVApp.app.bakeStale));
+
+    // Cancel while the initial undo snapshot is in flight, before unwrapping.
+    await page.evaluate(() => { document.getElementById('btn-unwrap').click(); document.getElementById('btn-cancel').click(); });
+    await idle();
+    check('immediate cancellation preserves the previous atlas', JSON.stringify(before) === JSON.stringify(await page.evaluate(() => Array.from(UVApp.app.result.uv))));
+    check('cancelling an unchanged layout preserves bake freshness', await page.evaluate(() => !!UVApp.app.baked && !UVApp.app.bakeStale));
+    check('cancel restores a usable engine result', await page.evaluate(async () => !!(await UVApp.app.client.snapshot()).uv));
+
+    // Delay file decoding deterministically to exercise Cancel before worker setup.
+    await page.evaluate(() => {
+      window.qaPreviousModel = UVApp.app.model;
+      window.qaPreviousClient = UVApp.app.client;
+      const original = UVApp.exporters.loadProject;
+      UVApp.exporters.loadProject = async (...args) => { UVApp.exporters.loadProject = original; const p = await original(...args); await new Promise(resolve => setTimeout(resolve, 500)); return p; };
+    });
+    await page.locator('#project-input').setInputFiles(projectPath);
+    await page.click('#btn-cancel'); await idle();
+    check('cancel during project reading retains the current model and engine', await page.evaluate(() => UVApp.app.model === window.qaPreviousModel && UVApp.app.client === window.qaPreviousClient));
 
     const validProject = JSON.parse(fs.readFileSync(projectPath, 'utf8'));
     validProject.snapshot.meshKey = 'different-mesh';
@@ -97,9 +118,14 @@ function check(label, condition) { assert.ok(condition, label); checks.push(labe
     check('malformed project leaves the prior result intact', JSON.stringify(before) === JSON.stringify(await page.evaluate(() => Array.from(UVApp.app.result.uv))));
 
     await page.selectOption('#view-texture', 'charts');
+    await page.locator('.toast').last().waitFor({ state: 'detached', timeout: 15000 });
+    await page.locator('.sidebar').evaluateAll(els => els.forEach(el => { el.scrollTop = 0; }));
+    await page.click('#btn-fit3d'); await page.click('#btn-fituv');
     await page.screenshot({ path: path.join(output, 'desktop.png'), fullPage: true });
     await page.click('#btn-theme');
     await page.setViewportSize({ width: 1100, height: 800 });
+    await page.click('#btn-fit3d');
+    await page.waitForFunction(() => UVApp.app.viewport.camera.aspect < 1);
     await page.screenshot({ path: path.join(output, 'compact-light.png'), fullPage: true });
     check('compact viewport has no horizontal page overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     check('browser has no uncaught errors', errors.length === 0);

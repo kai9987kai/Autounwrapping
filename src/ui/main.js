@@ -7,7 +7,7 @@
   const LS = { settings: 'uvtk4.settings', theme: 'uvtk4.theme', view: 'uvtk4.view' };
 
   const UI_PRESETS = {
-    game_hero: { hint: 'Low stretch, 2K texture, 8 texel padding (mip-safe to level 3).', s: { preset: 'game_hero', mode: 'atlas', parameterizer: 'bff', optimizer: 'slim', iterations: 16, segmentation: { angleDeg: 50, maxFaces: 8000, lloydIterations: 3 }, packing: { method: 'bitmap', resolution: 2048, paddingTexels: 8, rotations: 4, equalizeDensity: true }, seams: { visibility: false, sharpAngleDeg: 0 } } },
+    game_hero: { hint: 'Low stretch, 2K texture, 8 texel padding (estimated mip allowance: 3).', s: { preset: 'game_hero', mode: 'atlas', parameterizer: 'bff', optimizer: 'slim', iterations: 16, segmentation: { angleDeg: 50, maxFaces: 8000, lloydIterations: 3 }, packing: { method: 'bitmap', resolution: 2048, paddingTexels: 8, rotations: 4, equalizeDensity: true }, seams: { visibility: false, sharpAngleDeg: 0 } } },
     game_prop: { hint: 'Balanced quality for props: 1K texture, 4 texel padding.', s: { preset: 'game_prop', mode: 'atlas', parameterizer: 'bff', optimizer: 'slim', iterations: 10, segmentation: { angleDeg: 60, maxFaces: 8000, lloydIterations: 2 }, packing: { method: 'bitmap', resolution: 1024, paddingTexels: 4, rotations: 4, equalizeDensity: true }, seams: { visibility: false, sharpAngleDeg: 0 } } },
     lightmap: { hint: 'Unique, even texel density, small texture; hard edges become seams.', s: { preset: 'lightmap', mode: 'atlas', parameterizer: 'bff', optimizer: 'slim', iterations: 8, segmentation: { angleDeg: 45, maxFaces: 6000, lloydIterations: 2 }, packing: { method: 'bitmap', resolution: 512, paddingTexels: 3, rotations: 4, equalizeDensity: true }, seams: { visibility: false, sharpAngleDeg: 80 } } },
     film_udim: { hint: 'Near-isometric charts for film work: 4K texture, long optimisation.', s: { preset: 'film_udim', mode: 'atlas', parameterizer: 'bff', optimizer: 'slim', iterations: 30, segmentation: { angleDeg: 40, maxFaces: 12000, lloydIterations: 4 }, packing: { method: 'bitmap', resolution: 4096, paddingTexels: 12, rotations: 4, equalizeDensity: true }, seams: { visibility: false, sharpAngleDeg: 0 } } },
@@ -263,9 +263,9 @@
         if (state.client.mode === 'worker') {
           try {
             await state.client.ready;
-            const recovery = entry ? entry.snap : state.recoverySnapshot;
+            const recovery = entry ? entry.snap : state.recoverySnapshot ? Object.assign({}, state.recoverySnapshot, { manualCut: await state.client.getManualCut() }) : null;
             const back = recovery ? await state.client.restore(recovery) : null;
-            if (back) applyResult(back, { label: 'Cancelled — previous result kept' }); else clearResult();
+            if (back) applyResult(back, { label: 'Cancelled — previous result kept', displayOnly: true }); else clearResult();
           } catch (e) { clearResult(); }
         }
       }
@@ -435,21 +435,21 @@
       committed = true;
       if (previous) previous.dispose();
       if (project && project.settings) { state.settings = clone(project.settings); state.presetKey = project.presetKey || 'game_hero'; syncControls(); }
-    state.model = model;
-    state.result = null; state.analysis = null; state.selected = -1; state.baked = null; state.bakeStale = false; state.visCache = null;
-    state.undo = []; state.redo = [];
-    state.viewport.setModel(model);
-    state.viewport.setBakedTexture(null);
-    state.uvView.setBackgroundImage(null);
-    if ($('uv-bg').value === 'baked') { $('uv-bg').value = 'grid'; state.uvView.setStyle({ background: 'grid' }); }
-    state.compare = [];
-    U.panels.renderCompare([], restoreCompare, removeCompare);
-    if ($('view-texture').value === 'baked' || $('view-texture').value === 'original') { $('view-texture').value = 'checker'; state.viewport.setTextureMode('checker'); }
-    state.uvView.setData(null);
-    renderPanels(null);
-    $('model-chip').textContent = model.name + ' · ' + model.faceCount.toLocaleString() + ' tris';
-    $('model-chip').title = model.name + ' (' + model.format + ', ' + model.meshCount + ' mesh' + (model.meshCount === 1 ? '' : 'es') + ')';
-    for (const w of model.warnings || []) U.panels.log(w);
+      state.model = model;
+      state.result = null; state.analysis = null; state.selected = -1; state.baked = null; state.bakeStale = false; state.visCache = null;
+      state.undo = []; state.redo = [];
+      state.viewport.setModel(model);
+      state.viewport.setBakedTexture(null);
+      state.uvView.setBackgroundImage(null);
+      if ($('uv-bg').value === 'baked') { $('uv-bg').value = 'grid'; state.uvView.setStyle({ background: 'grid' }); }
+      state.compare = [];
+      U.panels.renderCompare([], restoreCompare, removeCompare);
+      if ($('view-texture').value === 'baked' || $('view-texture').value === 'original') { $('view-texture').value = 'checker'; state.viewport.setTextureMode('checker'); }
+      state.uvView.setData(null);
+      renderPanels(null);
+      $('model-chip').textContent = model.name + ' · ' + model.faceCount.toLocaleString() + ' tris';
+      $('model-chip').title = model.name + ' (' + model.format + ', ' + model.meshCount + ' mesh' + (model.meshCount === 1 ? '' : 'es') + ')';
+      for (const w of model.warnings || []) U.panels.log(w);
       const mi = state.meshInfo;
       $('status-mesh').textContent = mi.faceCount.toLocaleString() + ' faces · ' + mi.componentCount + ' part' + (mi.componentCount === 1 ? '' : 's') + (mi.boundaryEdgeCount ? ' · open' : ' · closed') + (mi.nonManifoldEdgeCount ? ' · ' + mi.nonManifoldEdgeCount + ' non-manifold edges' : '');
       U.panels.log('Loaded ' + model.name + ': ' + mi.faceCount + ' faces, ' + mi.weldCount + ' vertices, χ = ' + mi.eulerCharacteristic);
